@@ -4,6 +4,11 @@ Since [multiprocessing](https://docs.python.org/3/library/multiprocessing.html) 
 
 This is the reason why I created a substitute which instead converts data objects into bytes (if needed), puts the bytes into shared memory and only transfers meta-data about the data structure via Queues to the receiving end.
 
+Install using:
+```
+pip install py-sharedmemory
+```
+---
 The following data types are currently supported:
 ```
 - bytes
