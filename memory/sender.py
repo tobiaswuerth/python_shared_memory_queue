@@ -91,7 +91,7 @@ class SharedMemorySender:
 
     def put(self, data):
         self.process_ack()
-        while len(self.open_handles) >= self.capacity:
+        while self.capacity and len(self.open_handles) >= self.capacity:
             self.wait_for_ack()
 
         info, bytes_datas = self._prepare_binary(data)
@@ -121,7 +121,7 @@ class SharedMemorySender:
 
     def has_space(self):
         self.process_ack()
-        return len(self.open_handles) < self.capacity
+        return not self.capacity or len(self.open_handles) < self.capacity
 
     def process_ack(self):
         try:
