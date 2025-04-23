@@ -8,20 +8,19 @@ packages = ['memory']
 [project]
 name = "py-sharedmemory"
 authors = [{name = "Tobias Würth"}]
-version = "1.0.0"
+version = "1.0.1"
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.26"
 ]
 
-description = "Shared Memory Pipe for Fast Multiprocessing Data Sharing of Large Objects (>1MB)"
-keywords = ["python", "python3", "multiprocessing", "sharedmemory", "queue", "pipe"]
+description = "A replacement for Python multiprocessing.Queue that moves data objects into shared memory as raw bytes and sends only minimal metadata between processes — reducing I/O bottlenecks and improving throughput for larger data objects (>1MB)."
+keywords = ["python", "performance", "queue", "multiprocessing", "numpy", "zero-copy", "data-transfer", "low-latency", "inter-process-communication", "shared-memory", "high-throughput", "parallel-processing", "large-data", "memoryview"]
 readme = {file = "README.md", content-type = "text/markdown"}
-license = {file = "LICENSE"}
+license = "MIT"
 
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 
