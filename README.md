@@ -1,13 +1,15 @@
 # py-sharedmemory: High-Performance Multiprocessing Queue Alternative for Large Data
 
-Python's standard `multiprocessing.Queue` pickles data for inter-process communication. This often creates performance bottlenecks in demanding applications like Deep Reinforcement Learning (DeepRL) training, scientific computing, or distributed systems that handle large data objects (e.g., NumPy arrays, tensors >1MB) or involve high I/O volumes between many processes (like actors, replay buffers, and trainers).
-
-`py-sharedmemory` offers a high-performance replacement. It bypasses pickling by converting data into bytes and moving them into shared memory. Only minimal metadata is sent via the standard queue mechanism. This significantly reduces serialization overhead and inter-process I/O, drastically improving data transfer throughput for data-intensive Python multiprocessing tasks. If your application struggles with slow `multiprocessing.Queue` performance due to large object transfers, `py-sharedmemory` provides a faster alternative.
+[![PyPI version](https://badge.fury.io/py/py-sharedmemory.svg)](https://badge.fury.io/py/py-sharedmemory)
 
 Install using:
 ```
 pip install py-sharedmemory
 ```
+
+Python's standard `multiprocessing.Queue` pickles data for inter-process communication. This often creates performance bottlenecks in demanding applications like Deep Reinforcement Learning (DeepRL) training, scientific computing, or distributed systems that handle large data objects (e.g., NumPy arrays, tensors >1MB) or involve high I/O volumes between many processes (like actors, replay buffers, and trainers).
+
+`py-sharedmemory` offers a high-performance replacement. It bypasses pickling by converting data into bytes and moving them into shared memory. Only minimal metadata is sent via the standard queue mechanism. This significantly reduces serialization overhead and inter-process I/O, drastically improving data transfer throughput for data-intensive Python multiprocessing tasks. If your application struggles with slow `multiprocessing.Queue` performance due to large object transfers, `py-sharedmemory` provides a faster alternative.
 
 ---
 
