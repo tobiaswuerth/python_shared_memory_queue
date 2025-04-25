@@ -5,6 +5,7 @@ import os
 import numpy as np
 from tqdm import trange
 
+multiprocessing.set_start_method("spawn", force=True)
 
 package_sizes = [
     1_000,  # 1KB
@@ -26,15 +27,57 @@ class PerformanceTest:
     def __init__(self, name, factory: callable):
         self.name = name
         self.factory: callable = factory
-
-    def run(self):
-        multiprocessing.set_start_method("spawn", force=True)
+        
         os.makedirs(out_dir, exist_ok=True)
 
+    def run(self):
         for size in package_sizes:
-            self.test_size(size)
+            self.run_test(size)
 
-    def test_size(self, size):
+    def run_for_time(self, seconds=15):
+        for size in package_sizes:
+            self.run_for_time_test(size, seconds)
+
+    def run_for_time_test(self, size, seconds):
+        print("-" * 50)
+        print(f"Testing with package size: {size} bytes")
+
+        data_obj = os.urandom(size)
+        send, receive = self.factory()
+        
+        timestamps = [time.perf_counter()]
+        end_time = timestamps[0] + seconds
+        while end_time > time.perf_counter():
+            send(data_obj)
+            _ = receive()
+            timestamps.append(time.perf_counter())
+        
+        timestamps = np.array(timestamps)
+        start = timestamps[0]
+        end = timestamps[-1]
+        duration = end - start
+        count = len(timestamps) - 1
+        durations = timestamps[1:] - timestamps[:-1]
+        std_dev = np.std(durations)
+        mean = np.mean(durations)
+        bytes_per_second = (size * count) / duration
+
+        results = {
+            "start": start,
+            "end": end,
+            "duration": duration,
+            "count": count,
+            "mean": mean,
+            "std_dev": std_dev,
+            "bytes_per_second": bytes_per_second,
+            "size": size,
+        }
+        out_file = os.path.join(out_dir, f"{self.name}_{size:013d}.json")
+        with open(out_file, "w") as f:
+            json.dump(results, f)
+
+
+    def run_test(self, size):
         print("-" * 50)
         print(f"Testing with package size: {size} bytes")
 
