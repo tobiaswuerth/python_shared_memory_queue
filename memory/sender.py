@@ -18,6 +18,8 @@ class SharedMemorySender:
         self.has_capacity = threading.Semaphore(capacity) if capacity else None
         self.thread_ack_running = True
         self.thread_ack = threading.Thread(target=self._handle_acks, daemon=True)
+        self.is_empty = threading.Event()
+        self.is_empty.set()
         self.thread_ack.start()
 
         atexit.register(self._cleanup)
@@ -31,9 +33,8 @@ class SharedMemorySender:
 
         if self.open_handles is not None:
             try:
-                with self.open_handles_lock:
-                    for shm_name in list(self.open_handles.keys()):
-                        self._close_handle(shm_name)
+                for shm_name in list(self.open_handles.keys()):
+                    self._close_handle(shm_name)
             except FileNotFoundError | OSError:
                 pass
             except Exception as e:
@@ -71,12 +72,15 @@ class SharedMemorySender:
         self._cleanup()
 
     def _close_handle(self, shm_name: str):
-        shm = self.open_handles[shm_name]
-        shm.close()
-        shm.unlink()
-        del self.open_handles[shm_name]
-        if self.capacity:
-            self.has_capacity.release()
+        with self.open_handles_lock:
+            shm = self.open_handles[shm_name]
+            shm.close()
+            shm.unlink()
+            del self.open_handles[shm_name]
+            if len(self.open_handles) == 0:
+                self.is_empty.set()
+            if self.capacity:
+                self.has_capacity.release()
         
 
     def _handle_acks(self):
@@ -84,8 +88,7 @@ class SharedMemorySender:
             try:
                 ack_smh_name = self.queue_ack_in.get(timeout=0.1)
                 assert ack_smh_name is not None, "Received None as ack_smh_name"
-                with self.open_handles_lock:
-                    self._close_handle(ack_smh_name)
+                self._close_handle(ack_smh_name)
             except queue.Empty:
                 pass
             except Exception as e:
@@ -98,6 +101,8 @@ class SharedMemorySender:
         smh, info = data_to_smh(data)
         self.queue_data_out.put(info)
         with self.open_handles_lock:
+            if len(self.open_handles) == 0:
+                self.is_empty.clear()
             self.open_handles[smh.name] = smh
 
     def has_space(self):
@@ -109,20 +114,5 @@ class SharedMemorySender:
             return True
         return False
 
-    def wait_for_ack(self):
-        # Direct access to queue_ack_in is not thread-safe
-        # So we need to handle waiting differently
-        while True:
-            with self.open_handles_lock:
-                if not (self.capacity and len(self.open_handles) >= self.capacity):
-                    return
-            # Sleep briefly to avoid tight CPU loop
-            time.sleep(0.01)
-
     def wait_for_all_ack(self):
-        # Wait until all handles are closed
-        while True:
-            with self.open_handles_lock:
-                if len(self.open_handles) == 0:
-                    return
-            time.sleep(0.01)
+        self.is_empty.wait()
