@@ -16,7 +16,75 @@ class MyTuple(NamedTuple):
     c: str
 
 
+def _send(sender, data):
+    sender.put(data)
+
+
+def _receive(receiver, target):
+    item = receiver.get(timeout=2)
+    assert item == target, f"Expected {target}, got {item}"
+
+
 class TestSharedMemory(unittest.TestCase):
+
+    def test_process_send(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        data = 42
+        process = mp.Process(target=_send, args=(sender, data))
+        process.start()
+        item = receiver.get(timeout=2)
+        process.join()
+        self.assertEqual(
+            process.exitcode, 0, f"Process failed with exit code {process.exitcode}"
+        )
+        self.assertEqual(item, data, f"Expected {data}, got {item}")
+
+    def test_process_receive(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        data = 42
+        sender.put(data)
+        process = mp.Process(target=_receive, args=(receiver, data))
+        process.start()
+        process.join()
+        self.assertEqual(
+            process.exitcode, 0, f"Process failed with exit code {process.exitcode}"
+        )
+
+    def test_multiple_send(self):
+        N = 1000
+        sender, receiver = create_shared_memory_pair(capacity=N)
+        for i in range(N):
+            sender.put(i)
+        for i in range(N):
+            item = receiver.get(timeout=2)
+            self.assertEqual(item, i, f"Expected {i}, got {item}")
+
+    # TESTING QUEUE BEHAVIOR
+
+    def test_put_nowait_queue_full(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        sender.put(42)
+        with self.assertRaises(mp.queues.Full):
+            sender.put_nowait(43)
+
+    def test_put_queue_full_timeout(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        sender.put(42)
+        with self.assertRaises(mp.queues.Full):
+            sender.put(43, timeout=0.1)
+
+    def test_get_nowait_queue_empty(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        with self.assertRaises(mp.queues.Empty):
+            receiver.get_nowait()
+
+    def test_get_timeout(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        with self.assertRaises(mp.queues.Empty):
+            receiver.get(timeout=0.1)
+
+    # TESTING DIFFERENT DATA TYPES
+
     def test_None(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = None
