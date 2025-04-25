@@ -1,16 +1,16 @@
 import multiprocessing as mp
 import queue
-from multiprocessing.shared_memory import SharedMemory
-import pickle
-from pickle import PickleBuffer
 import atexit
+
+from .convert import data_to_smh
 
 class SharedMemorySender:
     def __init__(self, capacity, queue_data_out:mp.Queue, queue_ack_in:mp.Queue):
-        self.open_handles = {}
         self.queue_data_out = queue_data_out
         self.queue_ack_in = queue_ack_in
         self.capacity = capacity
+        
+        self.open_handles = {}
 
         atexit.register(self._cleanup)
 
@@ -55,22 +55,8 @@ class SharedMemorySender:
     def __del__(self):
         self._cleanup()
 
-    def _prepare_binary(self, data):
-        buffers:list[PickleBuffer] = []
-        buffer_lengths:list[int] = []
-        def _append_buffer(buffer:PickleBuffer):
-            memview = buffer.raw()
-            buffers.append(memview)
-            buffer_lengths.append(len(memview))
-        
-        main = pickle.dumps(data, buffer_callback=_append_buffer, protocol=pickle.HIGHEST_PROTOCOL)
-
-        len_main = len(main)
-        total = len_main + sum(buffer_lengths)
-        buffer_lengths.insert(0, len_main)
-        buffers.insert(0, main)
-
-        return total, buffer_lengths, buffers
+    def close(self):
+        self._cleanup()
 
 
     def put(self, data):
@@ -78,19 +64,9 @@ class SharedMemorySender:
         while self.capacity and len(self.open_handles) >= self.capacity:
             self.wait_for_ack()
 
-        total_bytes, buffer_lengths, buffers = self._prepare_binary(data)
-        assert total_bytes > 0, 'No data to send'
-
-        shm = SharedMemory(create=True, size=total_bytes)
-        info = ((shm.name, total_bytes), buffer_lengths)
-
-        offset = 0
-        for length, buffer in zip(buffer_lengths, buffers):
-            shm.buf[offset:offset + length] = buffer
-            offset += length
-
+        smh, info = data_to_smh(data)
         self.queue_data_out.put(info)
-        self.open_handles[shm.name] = shm
+        self.open_handles[smh.name] = smh
 
     def close_handle(self, shm_name:str):
         shm = self.open_handles[shm_name]
