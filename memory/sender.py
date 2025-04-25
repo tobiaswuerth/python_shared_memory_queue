@@ -1,5 +1,5 @@
-import multiprocessing as mp
-from multiprocessing.connection import PipeConnection
+from multiprocessing.queues import Queue
+from queue import Empty, Full
 import atexit
 import threading
 
@@ -7,23 +7,36 @@ from .convert import data_to_smh
 
 
 class SharedMemorySender:
-    def __init__(self, capacity: int, pipe_data_out: PipeConnection, pipe_ack_in: PipeConnection):
-        self.pipe_data_out: PipeConnection = pipe_data_out
-        self.pipe_ack_in: PipeConnection = pipe_ack_in
-        self.is_closed = False
-
+    def __init__(self, capacity: int, q_data_out: Queue, q_ack_in: Queue):
+        self.q_data_out: Queue = q_data_out
+        self.q_ack_in: Queue = q_ack_in
         self.capacity: int = capacity
 
+        self.is_closed = False
+        self.is_initialized = False
+
         self.open_handles = {}
-        self.open_handles_lock = threading.RLock()
-        self.has_capacity = threading.Semaphore(capacity) if capacity else None
+        self.open_handles_lock = None
+        self.has_capacity = None
+        self.is_empty = None
         self.thread_ack_running = True
-        self.thread_ack = threading.Thread(target=self._handle_acks, daemon=True)
+        self.thread_ack = None
+
+    def _initialize(self):
+        if self.is_initialized:
+            return
+
+        self.is_initialized = True
+        atexit.register(self._cleanup)
+
+        self.open_handles_lock = threading.RLock()
+        self.has_capacity = threading.Semaphore(self.capacity) if self.capacity else None
         self.is_empty = threading.Event()
         self.is_empty.set()
-        self.thread_ack.start()
 
-        atexit.register(self._cleanup)
+        self.thread_ack_running = True
+        self.thread_ack = threading.Thread(target=self._handle_acks, daemon=True)
+        self.thread_ack.start()
 
     def _cleanup(self):
         if self.is_closed is not None:
@@ -38,32 +51,13 @@ class SharedMemorySender:
                 pass
 
         if self.open_handles is not None:
-            try:
-                for shm_name in list(self.open_handles.keys()):
+            for shm_name in list(self.open_handles.keys()):
+                try:
                     self._close_handle(shm_name)
-            except FileNotFoundError | OSError:
-                pass
-            except Exception as e:
-                print(f"Error during cleanup: {e}")
-            finally:
-                self.open_handles.clear()
-                self.open_handles = None
-
-        if self.pipe_data_out is not None:
-            try:
-                self.pipe_data_out.close()
-            except Exception as e:
-                print(f"Error during pipe cleanup: {e}")
-            finally:
-                self.pipe_data_out = None
-
-        if self.pipe_ack_in is not None:
-            try:
-                self.pipe_ack_in.close()
-            except Exception as e:
-                print(f"Error during pipe cleanup: {e}")
-            finally:
-                self.pipe_ack_in = None
+                except:
+                    pass
+            self.open_handles.clear()
+            self.open_handles = None
 
     def __enter__(self):
         return self
@@ -91,10 +85,10 @@ class SharedMemorySender:
     def _handle_acks(self):
         while self.thread_ack_running:
             try:
-                if self.pipe_ack_in.poll(0.1):
-                    ack_smh_name = self.pipe_ack_in.recv()
-                    assert ack_smh_name is not None, "Received None as ack_smh_name"
-                    self._close_handle(ack_smh_name)
+                ack_smh_name = self.q_ack_in.get(timeout=0.1)
+                self._close_handle(ack_smh_name)
+            except Empty:
+                continue
             except Exception as e:
                 if not self.is_closed:
                     self.close()
@@ -103,13 +97,14 @@ class SharedMemorySender:
     def put_nowait(self, data):
         if self.is_closed:
             raise BrokenPipeError("Sender is closed.")
+        self._initialize()
 
         if not self.has_space():
-            raise BlockingIOError("No space available in the sender.")
+            raise Full
 
         try:
             smh, info = data_to_smh(data)
-            self.pipe_data_out.send(info)
+            self.q_data_out.put_nowait(info)
             with self.open_handles_lock:
                 if len(self.open_handles) == 0:
                     self.is_empty.clear()
@@ -122,22 +117,24 @@ class SharedMemorySender:
     def put(self, data, timeout: float = None):
         if self.is_closed:
             raise BrokenPipeError("Sender is closed.")
+        self._initialize()
+
+        if self.capacity:
+            if timeout is None:
+                while not self.is_closed:
+                    if self.has_capacity.acquire(timeout=0.1):
+                        break
+            else:
+                if not self.has_capacity.acquire(timeout=timeout):
+                    raise Full
+
+        if self.is_closed:
+            raise BrokenPipeError("Sender is closed.")
 
         try:
-            if self.capacity:
-                if timeout is not None:
-                    if not self.has_capacity.acquire(timeout=timeout):
-                        raise TimeoutError("Timeout waiting for space in the sender.")
-                else:
-                    while not self.is_closed:
-                        if self.has_capacity.acquire(timeout=0.1):
-                            break
-
-            if self.is_closed:
-                raise BrokenPipeError("Sender is closed.")
-
             smh, info = data_to_smh(data)
-            self.pipe_data_out.send(info)
+            self.q_data_out.put_nowait(info)
+
             with self.open_handles_lock:
                 if len(self.open_handles) == 0:
                     self.is_empty.clear()
@@ -148,7 +145,10 @@ class SharedMemorySender:
             raise e
 
     def has_space(self):
-        if not self.capacity:
+        if self.is_closed:
+            raise BrokenPipeError("Sender is closed.")
+
+        if not self.capacity or not self.is_initialized:
             return True
 
         if self.has_capacity.acquire(blocking=False):
@@ -157,4 +157,8 @@ class SharedMemorySender:
         return False
 
     def wait_for_all_ack(self):
+        if self.is_closed:
+            raise BrokenPipeError("Sender is closed.")
+        if not self.is_initialized:
+            return
         self.is_empty.wait()
