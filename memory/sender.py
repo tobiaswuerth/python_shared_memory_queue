@@ -15,6 +15,7 @@ class SharedMemorySender:
 
         self.open_handles = {}
         self.open_handles_lock = threading.RLock()
+        self.has_capacity = threading.Semaphore(capacity) if capacity else None
         self.thread_ack_running = True
         self.thread_ack = threading.Thread(target=self._handle_acks, daemon=True)
         self.thread_ack.start()
@@ -74,6 +75,9 @@ class SharedMemorySender:
         shm.close()
         shm.unlink()
         del self.open_handles[shm_name]
+        if self.capacity:
+            self.has_capacity.release()
+        
 
     def _handle_acks(self):
         while self.thread_ack_running:
@@ -88,23 +92,22 @@ class SharedMemorySender:
                 print(f"Error in acknowledgement thread: {e}")
 
     def put(self, data):
-        while self.capacity and len(self.open_handles) >= self.capacity:
-            self.wait_for_ack()
+        if self.capacity:
+            self.has_capacity.acquire()
 
         smh, info = data_to_smh(data)
+        self.queue_data_out.put(info)
         with self.open_handles_lock:
-            self.queue_data_out.put(info)
             self.open_handles[smh.name] = smh
 
     def has_space(self):
-        # No need to call process_ack() as it's now done in a separate thread
-        with self.open_handles_lock:
-            return not self.capacity or len(self.open_handles) < self.capacity
-
-    # No longer needed as acknowledgements are processed in a thread
-    def process_ack(self):
-        """Legacy method kept for backwards compatibility"""
-        pass
+        if not self.capacity:
+            return True
+        
+        if self.has_capacity.acquire(blocking=False):
+            self.has_capacity.release()
+            return True
+        return False
 
     def wait_for_ack(self):
         # Direct access to queue_ack_in is not thread-safe
