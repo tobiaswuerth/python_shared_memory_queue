@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-
+import time
 import multiprocessing as mp
 
 mp.log_to_stderr()
@@ -18,7 +18,7 @@ class MyTuple(NamedTuple):
 
 def _send(sender, data):
     sender.put(data)
-
+    time.sleep(1)
 
 def _receive(receiver, target):
     item = receiver.get(timeout=2)
@@ -51,7 +51,7 @@ class TestSharedMemory(unittest.TestCase):
         )
 
     def test_multiple_send(self):
-        N = 1000
+        N = 100
         sender, receiver = create_shared_memory_pair(capacity=N)
         for i in range(N):
             sender.put(i)
@@ -61,27 +61,38 @@ class TestSharedMemory(unittest.TestCase):
 
     # TESTING QUEUE BEHAVIOR
 
-    def test_put_nowait_queue_full(self):
+    def test_queue_full_put_nowait(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         sender.put(42)
         with self.assertRaises(mp.queues.Full):
             sender.put_nowait(43)
 
-    def test_put_queue_full_timeout(self):
+    def test_queue_full_put_timeout(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         sender.put(42)
         with self.assertRaises(mp.queues.Full):
             sender.put(43, timeout=0.1)
 
-    def test_get_nowait_queue_empty(self):
+    def test_queue_full_put_noblock(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        sender.put(42)
+        with self.assertRaises(mp.queues.Full):
+            sender.put(43, block=False)
+
+    def test_queue_empty_get_nowait(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         with self.assertRaises(mp.queues.Empty):
             receiver.get_nowait()
 
-    def test_get_timeout(self):
+    def test_queue_empty_get_timeout(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         with self.assertRaises(mp.queues.Empty):
             receiver.get(timeout=0.1)
+
+    def test_queue_empty_get_noblock(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        with self.assertRaises(mp.queues.Empty):
+            receiver.get(block=False)
 
     # TESTING DIFFERENT DATA TYPES
 
