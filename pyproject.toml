@@ -8,13 +8,13 @@ packages = ['memory']
 [project]
 name = "py-sharedmemory"
 authors = [{name = "Tobias Würth"}]
-version = "1.0.1"
+version = "2.0.0"
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.26"
 ]
 
-description = "A replacement for Python multiprocessing.Queue that moves data objects into shared memory as raw bytes and sends only minimal metadata between processes — reducing I/O bottlenecks and improving throughput for larger data objects (>1MB)."
+description = "Optimized Python IPC: Uses shared memory to bypass multiprocessing queue I/O bottlenecks, ideal for large data (1MB+) in scientific computing, RL, etc. Reduces system load and improves latency consistency"
 keywords = ["python", "performance", "queue", "multiprocessing", "numpy", "zero-copy", "data-transfer", "low-latency", "inter-process-communication", "shared-memory", "high-throughput", "parallel-processing", "large-data", "memoryview"]
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
