@@ -1,149 +1,111 @@
 import multiprocessing as mp
-import queue
-from multiprocessing.shared_memory import SharedMemory
+import threading as th
+import atexit
 
-from .converter import encode, iterables
+from .convert import data_to_smh
 
-class _Separator:
-    def __init__(self, obj):
-        self.obj = obj
-
-def _iterable_handler_list(stack, parents, entry):
-    stack.append(_Separator((type(entry), entry.__class__,)))
-    parents.append(([], []))
-    for field in reversed(entry): # reverse to maintain order in final binary
-        stack.append(field)
-
-def _iterable_handler_set(stack, parents, entry):
-    stack.append(_Separator((set,entry.__class__,)))
-    parents.append(([], []))
-    for field in entry:
-        stack.append(field)
-
-def _iterable_handler_dict(stack, parents, entry):
-    keys = list(entry.keys())
-    stack.append(_Separator((dict,entry.__class__,keys)))
-    parents.append(([], []))
-    for key in reversed(keys): # reverse to maintain order in final binary
-        stack.append(entry[key])
-
-iterable_handlers = {
-    list: _iterable_handler_list,
-    tuple: _iterable_handler_list,
-    set: _iterable_handler_set,
-    dict: _iterable_handler_dict,
-}
-
-tuple_key = iterables[tuple]
 
 class SharedMemorySender:
-    def __init__(self, capacity, queue_data_out:mp.Queue, queue_ack_in:mp.Queue):
+    def __init__(self, capacity: int, q_data_out: mp.Queue, q_ack_in: mp.Queue):
+        self.q_data_out: mp.Queue = q_data_out
+        self.q_ack_in: mp.Queue = q_ack_in
+        self.capacity: int = capacity
+
+        self.is_closed = False
+        self.is_initialized = False
+
         self.open_handles = {}
-        self.queue_data_out = queue_data_out
-        self.queue_ack_in = queue_ack_in
-        self.capacity = capacity
+        self.has_capacity = None
+        self.is_empty = None
+        self.thread_ack_running = True
+        self.thread_ack = None
 
-    def _prepare_binary(self, data):
-        parents:list[tuple[list[memoryview], list[tuple]]] = []
-        stack = [data]
-        while stack:
-            entry = stack.pop()
-            
-            if isinstance(entry, _Separator):
-                # children processed, gather the results
-                bytes_data, child_infos = parents.pop()
-                entry_type = entry.obj[0]
-                key = iterables.get(entry_type, tuple_key)
-                size = sum(info[1] for info in child_infos)
-                clazz = entry.obj[1]
-                if entry_type == dict:
-                    info = (key, size, clazz, child_infos, entry.obj[2])
-                else:   
-                    info = (key, size, clazz, child_infos)
-
-                if not parents:
-                    # root entry was tuple, return the result
-                    del parents, stack
-                    return info, bytes_data
-
-                # append to parent binary
-                parents[-1][0].extend(bytes_data)
-                parents[-1][1].append(info)
-                continue
-
-            entry_type = type(entry)
-            if entry_type in iterables:
-                iterable_handlers[entry_type](stack, parents, entry)
-                continue
-            if isinstance(entry, tuple):
-                # NamedTuple
-                _iterable_handler_list(stack, parents, entry)
-                continue
-
-            info, bytes_data = encode(entry)
-            if not parents:
-                # root entry was single data, return the result
-                del parents, stack
-                return info, [bytes_data]
-
-            parents[-1][0].append(bytes_data)
-            parents[-1][1].append(info)
-
-    def put(self, data):
-        self.process_ack()
-        while self.capacity and len(self.open_handles) >= self.capacity:
-            self.wait_for_ack()
-
-        info, bytes_datas = self._prepare_binary(data)
-        size = info[1]
-        if size == 0:
-            info = (None, *info)
-            self.queue_data_out.put(info)
+    def _initialize(self):
+        if self.is_initialized:
             return
 
-        shm = SharedMemory(create=True, size=size)
-        info = (shm.name, *info)
+        self.is_initialized = True
+        atexit.register(self._cleanup)
 
-        offset = 0
-        for item in bytes_datas:
-            size = len(item)
-            shm.buf[offset:offset + size] = item
-            offset += size
+        self.has_capacity = th.Semaphore(self.capacity or 0)
+        self.is_empty = th.Event()
+        self.is_empty.set()
 
-        self.queue_data_out.put(info)
-        self.open_handles[shm.name] = shm
+        self.thread_ack_running = True
+        self.thread_ack = th.Thread(target=self._handle_acks, daemon=True)
+        self.thread_ack.start()
 
-    def close_handle(self, shm_name:str):
-        shm = self.open_handles[shm_name]
-        shm.close()
-        shm.unlink()
-        del self.open_handles[shm_name]
+    def _cleanup(self):
+        if self.is_closed is not None:
+            self.is_closed = True
 
-    def has_space(self):
-        self.process_ack()
-        return not self.capacity or len(self.open_handles) < self.capacity
+        if self.thread_ack_running is not None:
+            self.thread_ack_running = False
+        if self.thread_ack is not None and self.thread_ack.is_alive():
+            self.thread_ack.join(timeout=1.0)
 
-    def process_ack(self):
-        try:
-            while True:
-                retour = self.queue_ack_in.get_nowait()
-                if retour is None:
-                    return
-                self.close_handle(retour)
-        except queue.Empty:
-            pass
-
-    def close_all(self):
-        for shm_name in list(self.open_handles.keys()):
-            self.close_handle(shm_name)
-
-    def wait_for_ack(self):
-        shm_name = self.queue_ack_in.get()
-        self.close_handle(shm_name)
-
-    def wait_for_all_ack(self):
-        while len(self.open_handles) > 0:
-            self.wait_for_ack()
+        if self.open_handles is not None:
+            for shm_name in list(self.open_handles.keys()):
+                try:
+                    self._close_handle(shm_name)
+                except:
+                    pass
+            self.open_handles = None
 
     def __del__(self):
-        self.close_all()
+        self._cleanup()
+
+    def _close_handle(self, shm_name: str):
+        smh = self.open_handles.pop(shm_name, None)
+        if smh is None:
+            return
+        if len(self.open_handles) == 0:
+            self.is_empty.set()
+
+        smh.close()
+        smh.unlink()
+        if self.capacity:
+            self.has_capacity.release()
+
+    def _handle_acks(self):
+        while self.thread_ack_running:
+            try:
+                ack_smh_name = self.q_ack_in.get(timeout=0.1)
+                self._close_handle(ack_smh_name)
+            except mp.queues.Empty:
+                continue
+            except Exception as e:
+                if not self.is_closed:
+                    print(f"SharedMemorySender._handle_acks error: {e}")
+                    self._cleanup()
+                raise e
+
+    def put_nowait(self, data):
+        return self.put(data, block=False)
+
+    def put(self, data, block: bool = True, timeout: float = None):
+        if self.is_closed:
+            raise BrokenPipeError("Sender is closed.")
+        self._initialize()
+
+        if self.capacity:
+            if not self.has_capacity.acquire(blocking=block, timeout=timeout):
+                raise mp.queues.Full
+
+        try:
+            smh, info = data_to_smh(data)
+            self.is_empty.clear()
+            self.q_data_out.put_nowait(info)
+            self.open_handles[smh.name] = smh
+        except Exception as e:
+            if not self.is_closed:
+                print(f"SharedMemorySender.put error: {e}")
+                self._cleanup()
+            raise e
+
+    def wait_for_all_ack(self):
+        if self.is_closed:
+            raise BrokenPipeError("Sender is closed.")
+        if not self.is_initialized:
+            return
+        self.is_empty.wait()

@@ -1,43 +1,129 @@
 import unittest
 import numpy as np
-
+import time
 import multiprocessing as mp
+
 mp.log_to_stderr()
 
 from typing import NamedTuple
 
 from memory import create_shared_memory_pair
 
+
 class MyTuple(NamedTuple):
-    a:int
-    b:float
-    c:str
+    a: int
+    b: float
+    c: str
+
+
+def _send(sender, data):
+    sender.put(data)
+    time.sleep(1)
+
+def _receive(receiver, target):
+    item = receiver.get(timeout=2)
+    assert item == target, f"Expected {target}, got {item}"
+
 
 class TestSharedMemory(unittest.TestCase):
+
+    def test_process_send(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        data = 42
+        process = mp.Process(target=_send, args=(sender, data))
+        process.start()
+        item = receiver.get(timeout=2)
+        process.join()
+        self.assertEqual(
+            process.exitcode, 0, f"Process failed with exit code {process.exitcode}"
+        )
+        self.assertEqual(item, data, f"Expected {data}, got {item}")
+
+    def test_process_receive(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        data = 42
+        sender.put(data)
+        process = mp.Process(target=_receive, args=(receiver, data))
+        process.start()
+        process.join()
+        self.assertEqual(
+            process.exitcode, 0, f"Process failed with exit code {process.exitcode}"
+        )
+
+    def test_multiple_send(self):
+        N = 100
+        sender, receiver = create_shared_memory_pair(capacity=N)
+        for i in range(N):
+            sender.put(i)
+        for i in range(N):
+            item = receiver.get(timeout=2)
+            self.assertEqual(item, i, f"Expected {i}, got {item}")
+
+    # TESTING QUEUE BEHAVIOR
+
+    def test_queue_full_put_nowait(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        sender.put(42)
+        with self.assertRaises(mp.queues.Full):
+            sender.put_nowait(43)
+
+    def test_queue_full_put_timeout(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        sender.put(42)
+        with self.assertRaises(mp.queues.Full):
+            sender.put(43, timeout=0.1)
+
+    def test_queue_full_put_noblock(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        sender.put(42)
+        with self.assertRaises(mp.queues.Full):
+            sender.put(43, block=False)
+
+    def test_queue_empty_get_nowait(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        with self.assertRaises(mp.queues.Empty):
+            receiver.get_nowait()
+
+    def test_queue_empty_get_timeout(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        with self.assertRaises(mp.queues.Empty):
+            receiver.get(timeout=0.1)
+
+    def test_queue_empty_get_noblock(self):
+        sender, receiver = create_shared_memory_pair(capacity=1)
+        with self.assertRaises(mp.queues.Empty):
+            receiver.get(block=False)
+
+    # TESTING DIFFERENT DATA TYPES
+
     def test_None(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = None
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_None_tuple(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = (None,None)
+        data = (None, None)
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_None_list(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = [None,None]
+        data = [None, None]
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_None_dict(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = {None:None}
+        data = {None: None}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_None_set(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = {None}
@@ -51,18 +137,21 @@ class TestSharedMemory(unittest.TestCase):
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_int_negative_small(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = -37
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_int_positive_big(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = 2147483640
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_int_negative_big(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = -2147483640
@@ -76,6 +165,7 @@ class TestSharedMemory(unittest.TestCase):
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_float2(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = -21474.83640
@@ -89,6 +179,7 @@ class TestSharedMemory(unittest.TestCase):
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_bool2(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = True
@@ -102,9 +193,10 @@ class TestSharedMemory(unittest.TestCase):
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_bytes_empty(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = b''
+        data = b""
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
@@ -115,12 +207,14 @@ class TestSharedMemory(unittest.TestCase):
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_str_empty(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = ""
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_str_long(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = """Zarathustra went down the mountain alone, no one meeting him. When he entered the forest, however, there suddenly stood before him an old man, who had left his holy cot to seek roots. And thus spake the old man to Zarathustra:
@@ -150,16 +244,18 @@ When Zarathustra was alone, however, he said to his heart: “Could it be possib
 
     def test_ndarray1(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = np.array([1,2,3,4,5], dtype=np.uint32)
+        data = np.array([1, 2, 3, 4, 5], dtype=np.uint32)
         sender.put(data)
         item = receiver.get(timeout=2)
         np.testing.assert_array_equal(item, data, f"Expected {data}, got {item}")
+
     def test_ndarray2(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = np.array([[1.2,2.3,3.4],[-53.3,-3535,1]], dtype=np.float32)
+        data = np.array([[1.2, 2.3, 3.4], [-53.3, -3535, 1]], dtype=np.float32)
         sender.put(data)
         item = receiver.get(timeout=2)
         np.testing.assert_array_equal(item, data, f"Expected {data}, got {item}")
+
     def test_ndarray_big(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = np.random.rand(64, 30, 6, 84, 84).astype(np.float32)
@@ -173,6 +269,7 @@ When Zarathustra was alone, however, he said to his heart: “Could it be possib
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_ndtype2(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = np.dtype(np.bool_)
@@ -182,152 +279,172 @@ When Zarathustra was alone, however, he said to his heart: “Could it be possib
 
     def test_list(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = [1,2,3,4,5]
+        data = [1, 2, 3, 4, 5]
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_list_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = [[1,2,3],[4,5,6]]
+        data = [[1, 2, 3], [4, 5, 6]]
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_list_mixed_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = [1,2,[3,4],5]
+        data = [1, 2, [3, 4], 5]
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_list_nested_tuple(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = [1,2,(3,4),5]
+        data = [1, 2, (3, 4), 5]
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_list_mixed(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = [1,'a',3.4,5, None, b'Hello World!']
+        data = [1, "a", 3.4, 5, None, b"Hello World!"]
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_list_empty(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = []
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_list_empty_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = [[],[]]
+        data = [[], []]
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_list_empty_nested_tuple(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = [(),()]
+        data = [(), ()]
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
 
     def test_tuple(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = (1,2,3,4,5)
+        data = (1, 2, 3, 4, 5)
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_tuple_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = ((1,2,3),(4,5,6))
+        data = ((1, 2, 3), (4, 5, 6))
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_tuple_mixed_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = (1,2,[3,4],5)
+        data = (1, 2, [3, 4], 5)
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_tuple_nested_list(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = (1,2,[3,4],5)
+        data = (1, 2, [3, 4], 5)
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_tuple_mixed(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = (1,'a',3.4,5, None, b'Hello World!')
+        data = (1, "a", 3.4, 5, None, b"Hello World!")
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_tuple_empty(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = ()
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_tuple_empty_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = ((),())
+        data = ((), ())
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
-    
+
     def test_namedtuple(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = MyTuple(1, 2.3, 'Hello World!')
+        data = MyTuple(1, 2.3, "Hello World!")
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
 
     def test_dict(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = {1: 'a', 'b': 2, 3: 4}
+        data = {1: "a", "b": 2, 3: 4}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_dict_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = {1: {2: 3, 4: 5}, 'a': {'b': 'c', 'd': 'e'}}
+        data = {1: {2: 3, 4: 5}, "a": {"b": "c", "d": "e"}}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_dict_mixed_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = {1: {2: 3, 4: 5}, 'a': ['b', 'c', 'd']}
+        data = {1: {2: 3, 4: 5}, "a": ["b", "c", "d"]}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_dict_mixed(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = {1: 'a', 'b': 2, 3: 4, 'c': None, 'd': b'Hello World!'}
+        data = {1: "a", "b": 2, 3: 4, "c": None, "d": b"Hello World!"}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_dict_empty(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = {}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_dict_empty_nested(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = {1: {}, 'a': {}}
+        data = {1: {}, "a": {}}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
-    
+
     def test_set(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = {1,2,3,4,5}
+        data = {1, 2, 3, 4, 5}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_set_mixed(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
-        data = {1,2,'a',None,4}
+        data = {1, 2, "a", None, 4}
         sender.put(data)
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
+
     def test_set_empty(self):
         sender, receiver = create_shared_memory_pair(capacity=1)
         data = set()
@@ -335,5 +452,6 @@ When Zarathustra was alone, however, he said to his heart: “Could it be possib
         item = receiver.get(timeout=2)
         self.assertEqual(item, data, f"Expected {data}, got {item}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

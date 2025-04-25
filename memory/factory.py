@@ -5,8 +5,9 @@ from .sender import SharedMemorySender
 
 
 def create_shared_memory_pair(capacity):
-    q_data = mp.Queue(capacity)
-    q_ack = mp.Queue()
-    sender = SharedMemorySender(capacity, q_data, q_ack)
-    receiver = SharedMemoryReceiver(q_data, q_ack)
+    data_queue = mp.Queue()
+    ack_queue = mp.Queue()
+
+    sender = SharedMemorySender(capacity, data_queue, ack_queue)
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
     return sender, receiver
