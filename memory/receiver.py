@@ -16,9 +16,8 @@ class SharedMemoryReceiver:
         return data
 
     def get_nowait(self):
-        info: SMInfo = self.q_data_in.get_nowait()
-        return self._process_info(info)
+        return self.get(block=False)
 
-    def get(self, timeout: float = None):
-        info: SMInfo = self.q_data_in.get(timeout=timeout)
+    def get(self, block: bool = True, timeout: float = None):
+        info: SMInfo = self.q_data_in.get(block, timeout)
         return self._process_info(info)
