@@ -3,6 +3,7 @@ import queue
 from multiprocessing.shared_memory import SharedMemory
 import pickle
 from pickle import PickleBuffer
+import atexit
 
 class SharedMemorySender:
     def __init__(self, capacity, queue_data_out:mp.Queue, queue_ack_in:mp.Queue):
@@ -10,6 +11,49 @@ class SharedMemorySender:
         self.queue_data_out = queue_data_out
         self.queue_ack_in = queue_ack_in
         self.capacity = capacity
+
+        atexit.register(self._cleanup)
+
+    def _cleanup(self):
+        if hasattr(self, 'open_handles') and self.open_handles is not None:
+            try:
+                for shm_name in list(self.open_handles.keys()):
+                    shm = self.open_handles[shm_name]
+                    shm.close()
+                    shm.unlink()
+                    del self.open_handles[shm_name]
+            except FileNotFoundError | OSError:
+                pass
+            except Exception as e:
+                print(f"Error during cleanup: {e}")
+            finally:
+                self.open_handles.clear()
+                self.open_handles = None
+
+        if hasattr(self, 'queue_data_out') and self.queue_data_out is not None:
+            try:
+                self.queue_data_out.close()
+            except Exception as e:
+                print(f"Error during queue cleanup: {e}")
+            finally:
+                self.queue_data_out = None
+
+        if hasattr(self, 'queue_ack_in') and self.queue_ack_in is not None:
+            try:
+                self.queue_ack_in.close()
+            except Exception as e:
+                print(f"Error during queue cleanup: {e}")
+            finally:
+                self.queue_ack_in = None
+        
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._cleanup()
+    
+    def __del__(self):
+        self._cleanup()
 
     def _prepare_binary(self, data):
         buffers:list[PickleBuffer] = []
@@ -68,10 +112,6 @@ class SharedMemorySender:
         except queue.Empty:
             pass
 
-    def close_all(self):
-        for shm_name in list(self.open_handles.keys()):
-            self.close_handle(shm_name)
-
     def wait_for_ack(self):
         shm_name = self.queue_ack_in.get()
         self.close_handle(shm_name)
@@ -79,6 +119,3 @@ class SharedMemorySender:
     def wait_for_all_ack(self):
         while len(self.open_handles) > 0:
             self.wait_for_ack()
-
-    def __del__(self):
-        self.close_all()
