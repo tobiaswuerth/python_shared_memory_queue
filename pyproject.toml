@@ -1,5 +1,5 @@
 [build-system]
-requires = ['setuptools>=61.0', 'numpy>=1.26']
+requires = ['setuptools>=61.0']
 build-backend = 'setuptools.build_meta'
 
 [tool.setuptools]
@@ -8,11 +8,9 @@ packages = ['memory']
 [project]
 name = "py-sharedmemory"
 authors = [{name = "Tobias Würth"}]
-version = "2.0.0"
+version = "2.0.1"
 requires-python = ">=3.9"
-dependencies = [
-    "numpy>=1.26"
-]
+dependencies = []
 
 description = "Optimized Python IPC: Uses shared memory to bypass multiprocessing queue I/O bottlenecks, ideal for large data (1MB+) in scientific computing, RL, etc. Reduces system load and improves latency consistency"
 keywords = ["python", "performance", "queue", "multiprocessing", "numpy", "zero-copy", "data-transfer", "low-latency", "inter-process-communication", "shared-memory", "high-throughput", "parallel-processing", "large-data", "memoryview"]
