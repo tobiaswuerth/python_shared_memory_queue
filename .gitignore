@@ -6,3 +6,7 @@ dist
 build
 *.egg-info
 test_results
+.venv-linux
+.coverage*
+htmlcov
+.ruff_cache

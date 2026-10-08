@@ -1,0 +1,307 @@
+{
+  "generated_at_utc": "2026-10-08T20:44:24+00:00",
+  "python": "3.12.10",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "processor": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+  "start_method": "spawn",
+  "capacity": 2,
+  "payload": "numpy",
+  "numpy": "2.5.3",
+  "repeats": 5,
+  "results": [
+    {
+      "transport": "standard",
+      "size": 16,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 0.7425418286798873,
+      "median_ms_per_message": 0.020549400011077523,
+      "durations_seconds": [
+        0.020549400011077523,
+        0.021477899979799986,
+        0.022792499978095293,
+        0.020008200081065297,
+        0.019884899957105517
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 16,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 0.16724654878544518,
+      "median_ms_per_message": 0.09123530006036162,
+      "durations_seconds": [
+        0.08629949996247888,
+        0.08637519995681942,
+        0.09123530006036162,
+        0.09378720005042851,
+        0.09136510011740029
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 100,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 4.462260513414229,
+      "median_ms_per_message": 0.02137199998833239,
+      "durations_seconds": [
+        0.019953600130975246,
+        0.02039630012586713,
+        0.02137199998833239,
+        0.021686699939891696,
+        0.023420499870553613
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 100,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 1.1002660645346019,
+      "median_ms_per_message": 0.08667670004069805,
+      "durations_seconds": [
+        0.08638779981993139,
+        0.08484159992076457,
+        0.08667670004069805,
+        0.09440850000828505,
+        0.09202970005571842
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 1000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 45.83364091443798,
+      "median_ms_per_message": 0.020807299995794892,
+      "durations_seconds": [
+        0.021246100077405572,
+        0.021943199913948774,
+        0.020457400009036064,
+        0.020807299995794892,
+        0.020025499863550067
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 1000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 11.195344691420509,
+      "median_ms_per_message": 0.08518489985726774,
+      "durations_seconds": [
+        0.09565860009752214,
+        0.0906982000451535,
+        0.08404040010645986,
+        0.08518489985726774,
+        0.08346029999665916
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 10000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 262.05891345409697,
+      "median_ms_per_message": 0.03639160003513098,
+      "durations_seconds": [
+        0.03642369993031025,
+        0.038353499956429005,
+        0.03639160003513098,
+        0.036201799986884,
+        0.03548920014873147
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 10000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 106.12217094187277,
+      "median_ms_per_message": 0.08986569987609982,
+      "durations_seconds": [
+        0.08986569987609982,
+        0.09749650000594556,
+        0.08847440010868013,
+        0.11053039995022118,
+        0.08925630012527108
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 100000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 2315.1312058219582,
+      "median_ms_per_message": 0.04119310015812516,
+      "durations_seconds": [
+        0.04137229989282787,
+        0.04119310015812516,
+        0.040372699964791536,
+        0.04432300012558699,
+        0.04042750014923513
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 100000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 796.7024284199971,
+      "median_ms_per_message": 0.1197026998270303,
+      "durations_seconds": [
+        0.1237476000096649,
+        0.11815480003133416,
+        0.1197026998270303,
+        0.12034039990976453,
+        0.1193633999209851
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 1000000,
+      "messages": 536,
+      "status": "ok",
+      "median_mib_per_second": 1021.481027310216,
+      "median_ms_per_message": 0.9336192165188658,
+      "durations_seconds": [
+        0.4930717998649925,
+        0.5014142000582069,
+        0.4996480999980122,
+        0.5004199000541121,
+        0.5193441999144852
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 1000000,
+      "messages": 536,
+      "status": "ok",
+      "median_mib_per_second": 2055.961675147389,
+      "median_ms_per_message": 0.4638580222259651,
+      "durations_seconds": [
+        0.2541994000785053,
+        0.25222310004755855,
+        0.2486278999131173,
+        0.2309012000914663,
+        0.2286161999218166
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 10000000,
+      "messages": 53,
+      "status": "ok",
+      "median_mib_per_second": 1176.9989935842088,
+      "median_ms_per_message": 8.102592454239163,
+      "durations_seconds": [
+        0.430602699983865,
+        0.42821709997951984,
+        0.4294374000746757,
+        0.42666890006512403,
+        0.43743159994482994
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 10000000,
+      "messages": 53,
+      "status": "ok",
+      "median_mib_per_second": 2387.3535374556163,
+      "median_ms_per_message": 3.9946924552391723,
+      "durations_seconds": [
+        0.21778219984844327,
+        0.21185920014977455,
+        0.20215429994277656,
+        0.20914670010097325,
+        0.21171870012767613
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 100000000,
+      "messages": 5,
+      "status": "ok",
+      "median_mib_per_second": 1033.8271415910588,
+      "median_ms_per_message": 92.24697998724878,
+      "durations_seconds": [
+        0.4336757001001388,
+        0.42797669977881014,
+        0.4777193998452276,
+        0.49138489994220436,
+        0.4612348999362439
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 100000000,
+      "messages": 5,
+      "status": "ok",
+      "median_mib_per_second": 1820.1475484479774,
+      "median_ms_per_message": 52.395439986139536,
+      "durations_seconds": [
+        0.2619771999306977,
+        0.27571900002658367,
+        0.27378659998066723,
+        0.23594350018538535,
+        0.22745099989697337
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 1000000000,
+      "messages": 1,
+      "status": "ok",
+      "median_mib_per_second": 855.4005929555464,
+      "median_ms_per_message": 1114.8861998226494,
+      "durations_seconds": [
+        1.1248251998331398,
+        1.1107582999393344,
+        1.1153473001904786,
+        1.1148861998226494,
+        1.1132561000995338
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 1000000000,
+      "messages": 1,
+      "status": "ok",
+      "median_mib_per_second": 1261.532534818432,
+      "median_ms_per_message": 755.9648999013007,
+      "durations_seconds": [
+        0.7711614000145346,
+        0.7535740002058446,
+        0.7559648999013007,
+        0.7477863999083638,
+        0.762069399934262
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 10000000000,
+      "messages": 1,
+      "status": "failed",
+      "error": "TimeoutError: Benchmark consumer did not signal ready",
+      "stderr": "Traceback (most recent call last):\n  File \"D:\\_app\\Python312\\Lib\\multiprocessing\\queues.py\", line 266, in _feed\n    send_bytes(obj)\n  File \"D:\\_app\\Python312\\Lib\\multiprocessing\\connection.py\", line 200, in send_bytes\n    self._send_bytes(m[offset:offset + size])\n  File \"D:\\_app\\Python312\\Lib\\multiprocessing\\connection.py\", line 289, in _send_bytes\n    ov, err = _winapi.WriteFile(self._handle, buf, overlapped=True)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nOSError: [WinError 87] The parameter is incorrect\n",
+      "durations_seconds": []
+    },
+    {
+      "transport": "shared",
+      "size": 10000000000,
+      "messages": 1,
+      "status": "ok",
+      "median_mib_per_second": 1267.9223043785003,
+      "median_ms_per_message": 7521.551700076088,
+      "durations_seconds": [
+        7.682144199963659,
+        7.680391300003976,
+        7.521551700076088,
+        7.516883099917322,
+        7.502630699891597
+      ]
+    }
+  ]
+}

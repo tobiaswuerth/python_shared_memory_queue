@@ -1,111 +1,231 @@
-import multiprocessing as mp
-import threading as th
-import atexit
+"""The producing endpoint owns each allocation until it is acknowledged."""
 
-from .convert import data_to_smh
+import os
+import threading
+import time
+from multiprocessing.queues import Queue
+from multiprocessing.shared_memory import SharedMemory
+from multiprocessing.util import Finalize
+from queue import Empty, Full
+from typing import Any, Self
+
+from .convert import SharedMemoryMessage, release_shared_memory, serialize
+
+
+def _validate_capacity(capacity: int | None) -> None:
+    if capacity is None:
+        return
+    if not isinstance(capacity, int) or isinstance(capacity, bool):
+        raise TypeError("capacity must be an integer or None")
+    if capacity < 0:
+        raise ValueError("capacity must not be negative")
 
 
 class SharedMemorySender:
-    def __init__(self, capacity: int, q_data_out: mp.Queue, q_ack_in: mp.Queue):
-        self.q_data_out: mp.Queue = q_data_out
-        self.q_ack_in: mp.Queue = q_ack_in
-        self.capacity: int = capacity
+    """Thread-safe sender for one producing process. Drain before closing."""
 
-        self.is_closed = False
-        self.is_initialized = False
+    def __init__(
+        self,
+        capacity: int | None,
+        data_queue: Queue,
+        ack_queue: Queue,
+        *,
+        producer_owner=None,
+    ):
+        _validate_capacity(capacity)
+        self.capacity = capacity
+        self._data_queue = data_queue
+        self._ack_queue = ack_queue
+        self._closed = False
+        self._blocks: dict[str, SharedMemory] = {}
+        self._pending_count = 0
+        self._condition = threading.Condition()
+        self._producer_owner = producer_owner
+        self._process_id: int | None = None
+        self._ack_thread: threading.Thread | None = None
+        self._ack_error: Exception | None = None
+        self._finalizer = None
 
-        self.open_handles = {}
-        self.has_capacity = None
-        self.is_empty = None
-        self.thread_ack_running = True
-        self.thread_ack = None
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
-    def _initialize(self):
-        if self.is_initialized:
-            return
-
-        self.is_initialized = True
-        atexit.register(self._cleanup)
-
-        self.has_capacity = th.Semaphore(self.capacity or 0)
-        self.is_empty = th.Event()
-        self.is_empty.set()
-
-        self.thread_ack_running = True
-        self.thread_ack = th.Thread(target=self._handle_acks, daemon=True)
-        self.thread_ack.start()
-
-    def _cleanup(self):
-        if self.is_closed is not None:
-            self.is_closed = True
-
-        if self.thread_ack_running is not None:
-            self.thread_ack_running = False
-        if self.thread_ack is not None and self.thread_ack.is_alive():
-            self.thread_ack.join(timeout=1.0)
-
-        if self.open_handles is not None:
-            for shm_name in list(self.open_handles.keys()):
-                try:
-                    self._close_handle(shm_name)
-                except:
-                    pass
-            self.open_handles = None
-
-    def __del__(self):
-        self._cleanup()
-
-    def _close_handle(self, shm_name: str):
-        smh = self.open_handles.pop(shm_name, None)
-        if smh is None:
-            return
-        if len(self.open_handles) == 0:
-            self.is_empty.set()
-
-        smh.close()
-        smh.unlink()
-        if self.capacity:
-            self.has_capacity.release()
-
-    def _handle_acks(self):
-        while self.thread_ack_running:
-            try:
-                ack_smh_name = self.q_ack_in.get(timeout=0.1)
-                self._close_handle(ack_smh_name)
-            except mp.queues.Empty:
-                continue
-            except Exception as e:
-                if not self.is_closed:
-                    print(f"SharedMemorySender._handle_acks error: {e}")
-                    self._cleanup()
-                raise e
-
-    def put_nowait(self, data):
-        return self.put(data, block=False)
-
-    def put(self, data, block: bool = True, timeout: float = None):
-        if self.is_closed:
-            raise BrokenPipeError("Sender is closed.")
-        self._initialize()
-
-        if self.capacity:
-            if not self.has_capacity.acquire(blocking=block, timeout=timeout):
-                raise mp.queues.Full
-
+    def put(self, data: Any, block: bool = True, timeout: float | None = None) -> None:
+        """Send data; timeout limits waiting for capacity. Raises queue.Full."""
+        self._reserve_slot(block, timeout)
         try:
-            smh, info = data_to_smh(data)
-            self.is_empty.clear()
-            self.q_data_out.put_nowait(info)
-            self.open_handles[smh.name] = smh
-        except Exception as e:
-            if not self.is_closed:
-                print(f"SharedMemorySender.put error: {e}")
-                self._cleanup()
-            raise e
+            allocation, message = serialize(data)
+        except BaseException:
+            self._release_slot()
+            raise
+        self._publish(allocation, message)
 
-    def wait_for_all_ack(self):
-        if self.is_closed:
-            raise BrokenPipeError("Sender is closed.")
-        if not self.is_initialized:
+    def put_nowait(self, data: Any) -> None:
+        self.put(data, block=False)
+
+    def wait_for_all_ack(self, timeout: float | None = None) -> bool:
+        """Wait until outstanding memory is freed; return False on timeout."""
+        self._check_process()
+        with self._condition:
+            self._ensure_open()
+            drained = self._condition.wait_for(
+                lambda: self._pending_count == 0 or self._closed, timeout=timeout
+            )
+            self._ensure_open()
+            return drained
+
+    def close(self) -> None:
+        """Discard unread messages, stop the ack thread, and close local queues."""
+        self._check_process()
+        errors = []
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            discarding_messages = self._pending_count > 0
+            for name in list(self._blocks):
+                try:
+                    self._release_message(name)
+                except Exception as error:
+                    errors.append(error)
+            self._condition.notify_all()
+            if self._finalizer is not None:
+                self._finalizer.cancel()
+
+        if self._ack_thread is not None and self._ack_thread is not threading.current_thread():
+            self._ack_thread.join(timeout=1)
+        for queue in (self._data_queue, self._ack_queue):
+            try:
+                if discarding_messages:
+                    # Unread metadata must not keep the queue feeder alive at exit.
+                    queue.cancel_join_thread()
+                queue.close()
+                if not discarding_messages:
+                    queue.join_thread()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("Failed to close shared-memory sender", errors)
+
+    def __enter__(self) -> Self:
+        self._check_process()
+        self._ensure_open()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+    def __getstate__(self) -> dict[str, Any]:
+        if self._process_id is not None:
+            raise RuntimeError("Pass the sender to its process before the first put")
+        state = self.__dict__.copy()
+        del state["_condition"]
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._condition = threading.Condition()
+
+    def _check_process(self) -> None:
+        if self._process_id is not None and self._process_id != os.getpid():
+            raise RuntimeError("An initialized sender cannot be used in another process")
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise BrokenPipeError("Sender is closed") from self._ack_error
+
+    def _reserve_slot(self, block: bool, timeout: float | None) -> None:
+        self._check_process()
+        deadline = None
+        if block and timeout is not None:
+            deadline = time.monotonic() + max(0, timeout)
+        with self._condition:
+            self._ensure_open()
+            self._start_ack_thread()
+            while self.capacity and self._pending_count >= self.capacity:
+                if not block:
+                    raise Full
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise Full
+                self._condition.wait(remaining)
+                self._ensure_open()
+            self._pending_count += 1
+
+    def _publish(self, allocation: SharedMemory, message: SharedMemoryMessage) -> None:
+        with self._condition:
+            try:
+                # Transfer ownership before metadata can reach the receiver.
+                self._blocks[allocation.name] = allocation
+            except BaseException:
+                self._release_allocation(allocation)
+                raise
+            try:
+                self._ensure_open()
+                self._data_queue.put_nowait(message)
+            except BaseException:
+                self._release_message(allocation.name)
+                raise
+
+    def _release_slot(self) -> None:
+        with self._condition:
+            self._pending_count -= 1
+            self._condition.notify_all()
+
+    def _release_allocation(self, allocation: SharedMemory) -> None:
+        try:
+            release_shared_memory(allocation)
+        finally:
+            # Capacity becomes available only after memory is freed.
+            self._release_slot()
+
+    def _release_message(self, name: str) -> None:
+        with self._condition:
+            allocation = self._blocks.pop(name, None)
+            if allocation is not None:
+                self._release_allocation(allocation)
+
+    def _start_ack_thread(self) -> None:
+        if self._process_id is not None:
             return
-        self.is_empty.wait()
+        process_id = os.getpid()
+        if self._producer_owner is not None:
+            with self._producer_owner.get_lock():
+                if self._producer_owner.value not in (0, process_id):
+                    raise RuntimeError("A shared-memory pair supports one producing process")
+                self._producer_owner.value = process_id
+        self._process_id = process_id
+        try:
+            self._ack_thread = threading.Thread(
+                target=self._process_acknowledgements, name="shared-memory-acks", daemon=True
+            )
+            self._finalizer = Finalize(self, self.close, exitpriority=10)
+            self._ack_thread.start()
+        except BaseException:
+            if self._finalizer is not None:
+                self._finalizer.cancel()
+            self._finalizer = None
+            self._ack_thread = None
+            self._process_id = None
+            if self._producer_owner is not None:
+                with self._producer_owner.get_lock():
+                    self._producer_owner.value = 0
+            raise
+
+    def _process_acknowledgements(self) -> None:
+        while not self._closed:
+            try:
+                self._release_message(self._ack_queue.get(timeout=0.05))
+            except Empty:
+                continue
+            except Exception as error:
+                with self._condition:
+                    self._ack_error = error
+                try:
+                    self.close()
+                except Exception as cleanup_error:
+                    with self._condition:
+                        self._ack_error = ExceptionGroup(
+                            "Acknowledgement and cleanup failed", [error, cleanup_error]
+                        )
+                return

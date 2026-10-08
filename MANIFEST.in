@@ -1,0 +1,4 @@
+include CHANGELOG.md
+recursive-include tests *.py
+recursive-include benchmarks *.py *.json *.png
+recursive-include examples *.py

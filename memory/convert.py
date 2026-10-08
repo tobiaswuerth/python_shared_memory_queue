@@ -1,53 +1,95 @@
-from typing import NamedTuple
-from multiprocessing.shared_memory import SharedMemory
+"""Serialize protocol-5 pickle data through a single shared-memory block."""
+
 import pickle
-from pickle import PickleBuffer
+from multiprocessing.shared_memory import SharedMemory
+from typing import Any, NamedTuple
 
 
-class SMInfo(NamedTuple):
-    smh_name: str
-    total_bytes: int
-    buffer_lengths: list[int]
+class SharedMemoryMessage(NamedTuple):
+    name: str
+    buffer_sizes: tuple[int, ...]
+
+    @property
+    def size(self) -> int:
+        return sum(self.buffer_sizes)
 
 
-def data_to_smh(data: any) -> tuple[SharedMemory, SMInfo]:
-    buffers: list[PickleBuffer] = []
-    buffer_lengths: list[int] = []
-
-    def _append_buffer(buffer: PickleBuffer):
-        memview = buffer.raw()
-        buffers.append(memview)
-        buffer_lengths.append(len(memview))
-
-    main = pickle.dumps(data, pickle.HIGHEST_PROTOCOL, buffer_callback=_append_buffer)
-
-    len_main = len(main)
-    total_bytes = len_main + sum(buffer_lengths)
-    buffer_lengths.insert(0, len_main)
-    buffers.insert(0, main)
-
-    shm: SharedMemory = SharedMemory(create=True, size=total_bytes)
-    offset = 0
-    for length, buffer in zip(buffer_lengths, buffers):
-        shm.buf[offset : offset + length] = buffer
-        offset += length
-
-    info: SMInfo = SMInfo(shm.name, total_bytes, buffer_lengths)
-    return shm, info
+def release_shared_memory(allocation: SharedMemory) -> None:
+    """Release both the mapping and its name, including on error paths."""
+    try:
+        allocation.close()
+    finally:
+        try:
+            allocation.unlink()
+        except FileNotFoundError:
+            pass
 
 
-def data_from_smh(info: SMInfo) -> any:
-    shm: SharedMemory = SharedMemory(name=info.smh_name, size=info.total_bytes)
-    local_buffers: bytes = bytes(shm.buf[: info.total_bytes])
-    shm.close()
+def serialize(data: Any) -> tuple[SharedMemory, SharedMemoryMessage]:
+    """Copy a pickle and its out-of-band buffers into owned shared memory."""
+    buffers: list[memoryview] = []
+    allocation = None
 
-    # unpack data
+    def append_buffer(buffer: pickle.PickleBuffer) -> None:
+        buffers.append(buffer.raw())
+
+    try:
+        pickle_data = pickle.dumps(data, protocol=5, buffer_callback=append_buffer)
+        buffer_sizes = (len(pickle_data), *(buffer.nbytes for buffer in buffers))
+        allocation = SharedMemory(create=True, size=sum(buffer_sizes))
+        allocation.buf[: len(pickle_data)] = pickle_data
+        offset = len(pickle_data)
+        for buffer in buffers:
+            allocation.buf[offset : offset + buffer.nbytes] = buffer
+            offset += buffer.nbytes
+        return allocation, SharedMemoryMessage(allocation.name, buffer_sizes)
+    except BaseException:
+        if allocation is not None:
+            release_shared_memory(allocation)
+        raise
+    finally:
+        for buffer in buffers:
+            buffer.release()
+
+
+def deserialize(message: SharedMemoryMessage) -> Any:
+    """Unpickle with owned local buffers and always close the shared mapping."""
+    _validate_message(message)
+    allocation = SharedMemory(name=message.name)
+    try:
+        if message.size > allocation.size:
+            raise ValueError("Shared-memory block is smaller than its metadata")
+        pickle_size = message.buffer_sizes[0]
+        buffers = []
+        if len(message.buffer_sizes) > 1:
+            with allocation.buf[pickle_size : message.size] as shared_buffer:
+                buffers = _copy_buffers(shared_buffer, message.buffer_sizes[1:])
+        with allocation.buf[:pickle_size] as pickle_data:
+            return pickle.loads(pickle_data, buffers=buffers)
+    finally:
+        allocation.close()
+
+
+def _validate_message(message: SharedMemoryMessage) -> None:
+    if not isinstance(message, SharedMemoryMessage) or not isinstance(message.name, str):
+        raise ValueError("Invalid shared-memory metadata")
+    sizes = message.buffer_sizes
+    if (
+        not message.name
+        or not isinstance(sizes, tuple)
+        or not sizes
+        or any(type(size) is not int or size < 0 for size in sizes)
+        or sizes[0] == 0
+    ):
+        raise ValueError("Invalid shared-memory metadata")
+
+
+def _copy_buffers(shared_buffer: memoryview, sizes: tuple[int, ...]) -> list[memoryview]:
+    # One writable copy; each returned view keeps its local storage alive.
     buffers = []
-    offset = 0
-    for length in info.buffer_lengths:
-        buffer = local_buffers[offset : offset + length]
-        buffers.append(buffer)
-        offset += length
-
-    main = buffers.pop(0)
-    return pickle.loads(main, buffers=buffers)
+    with memoryview(bytearray(shared_buffer)) as local_buffer:
+        offset = 0
+        for size in sizes:
+            buffers.append(local_buffer[offset : offset + size])
+            offset += size
+    return buffers

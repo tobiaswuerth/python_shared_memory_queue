@@ -1,5 +1,5 @@
 [build-system]
-requires = ['setuptools>=61.0']
+requires = ['setuptools>=77.0.3']
 build-backend = 'setuptools.build_meta'
 
 [tool.setuptools]
@@ -8,20 +8,47 @@ packages = ['memory']
 [project]
 name = "py-sharedmemory"
 authors = [{name = "Tobias Würth"}]
-version = "2.0.1"
-requires-python = ">=3.9"
+version = "3.0.0"
+requires-python = ">=3.11"
 dependencies = []
 
-description = "Optimized Python IPC: Uses shared memory to bypass multiprocessing queue I/O bottlenecks, ideal for large data (1MB+) in scientific computing, RL, etc. Reduces system load and improves latency consistency"
-keywords = ["python", "performance", "queue", "multiprocessing", "numpy", "zero-copy", "data-transfer", "low-latency", "inter-process-communication", "shared-memory", "high-throughput", "parallel-processing", "large-data", "memoryview"]
+description = "Shared-memory queues for large Python objects with less pipe I/O"
+keywords = ["queue", "multiprocessing", "numpy", "inter-process-communication", "shared-memory"]
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
+license-files = ["LICENSE"]
 
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Operating System :: OS Independent",
 ]
 
 [project.urls]
 Repository = "https://github.com/tobiaswuerth/python_shared_memory_queue"
 "Bug Tracker" = "https://github.com/tobiaswuerth/python_shared_memory_queue/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7.4", "pytest-cov>=4.1", "pytest-timeout>=2.3", "numpy>=1.26"]
+benchmark = ["numpy>=1.26", "matplotlib>=3.8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+timeout = 45
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["memory"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
