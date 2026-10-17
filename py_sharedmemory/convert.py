@@ -1,5 +1,6 @@
 """Serialize protocol-5 pickle data through a single shared-memory block."""
 
+import errno
 import pickle
 import sys
 from contextlib import suppress
@@ -60,7 +61,15 @@ def serialize(data: Any) -> tuple[SharedMemory, SharedMemoryMessage]:
 def deserialize(message: SharedMemoryMessage) -> Any:
     """Unpickle with owned local buffers and always close the shared mapping."""
     _validate_message(message)
-    allocation = SharedMemory(name=message.name, **_ATTACH_OPTIONS)
+    try:
+        allocation = SharedMemory(name=message.name, **_ATTACH_OPTIONS)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            errno.ENOENT,
+            "Shared-memory block was freed before it was received; the sender probably "
+            "closed without calling wait_for_all_ack()",
+            message.name,
+        ) from error
     try:
         if message.size > allocation.size:
             raise ValueError("Shared-memory block is smaller than its metadata")

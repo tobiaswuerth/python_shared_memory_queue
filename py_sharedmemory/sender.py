@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 import warnings
 from multiprocessing.queues import Queue
 from multiprocessing.shared_memory import SharedMemory
+from multiprocessing.synchronize import SEM_VALUE_MAX  # type: ignore[attr-defined]  # not in typeshed
 from multiprocessing.util import Finalize
 from queue import Empty, Full
 from types import TracebackType
@@ -17,6 +19,14 @@ from .convert import SharedMemoryMessage, release_shared_memory, serialize
 
 if TYPE_CHECKING:
     from multiprocessing.sharedctypes import Synchronized
+
+# A POSIX block lives on by name until it is unlinked, so the sender can drop its mapping
+# and file descriptors right after writing. Windows frees a block with its last handle.
+_UNMAP_AFTER_WRITE = sys.platform != "win32"
+
+# The metadata queue holds at most SEM_VALUE_MAX unread items (32,767 on macOS); beyond
+# that its put would raise queue.Full even for a blocking put on an unbounded sender.
+_MAX_OUTSTANDING = SEM_VALUE_MAX
 
 
 def _validate_capacity(capacity: int | None) -> None:
@@ -215,7 +225,8 @@ class SharedMemorySender:
         with self._condition:
             self._ensure_open()
             self._start_ack_thread()
-            while self.capacity and self._pending_count >= self.capacity:
+            limit = min(self.capacity or _MAX_OUTSTANDING, _MAX_OUTSTANDING)
+            while self._pending_count >= limit:
                 if not block:
                     raise Full
                 remaining = None if deadline is None else deadline - time.monotonic()
@@ -235,6 +246,8 @@ class SharedMemorySender:
                 raise
             try:
                 self._ensure_open()
+                if _UNMAP_AFTER_WRITE:
+                    allocation.close()
                 self._data_queue.put_nowait(message)
             except BaseException:
                 self._release_message(allocation.name)

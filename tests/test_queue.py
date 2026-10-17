@@ -1,11 +1,13 @@
 import multiprocessing as mp
 import os
 import pickle
+import sys
 import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from multiprocessing.shared_memory import SharedMemory
 from queue import Empty, Full
 from unittest.mock import Mock
 
@@ -91,6 +93,38 @@ def test_full_nonblocking_and_immediate_timeouts(make_pair, kwargs):
     assert sender.wait_for_all_ack(timeout=3)
     sender.put(3, **kwargs)
     assert receiver.get(timeout=3) == 3
+
+
+@pytest.mark.parametrize("capacity", [0, None, 5])
+def test_outstanding_messages_never_exceed_the_metadata_queue_limit(
+    make_pair, monkeypatch, capacity
+):
+    # macOS limits a multiprocessing queue to 32,767 unread items; simulate a tiny limit.
+    monkeypatch.setattr(sender_module, "_MAX_OUTSTANDING", 2)
+    sender, receiver = make_pair(capacity)
+    sender.put(1)
+    sender.put(2)
+    with pytest.raises(Full):
+        sender.put_nowait(3)
+    with pytest.raises(Full):
+        sender.put(3, timeout=0.05)
+    assert receiver.get(timeout=3) == 1
+    sender.put(3, timeout=3)
+    assert [receiver.get(timeout=3) for _ in range(2)] == [2, 3]
+    assert sender.wait_for_all_ack(timeout=3)
+
+
+@pytest.mark.parametrize("unmap", [False, True])
+def test_sender_unmaps_blocks_only_where_names_keep_them_alive(make_pair, monkeypatch, unmap):
+    monkeypatch.setattr(sender_module, "_UNMAP_AFTER_WRITE", unmap)
+    sender, receiver = make_pair()
+    sender.put(42)
+    allocation = next(iter(sender._blocks.values()))
+    assert (allocation.buf is None) is unmap
+    if not (unmap and sys.platform == "win32"):
+        # Windows frees an unmapped block at once, which is why it never unmaps.
+        assert receiver.get(timeout=3) == 42
+        assert sender.wait_for_all_ack(timeout=3)
 
 
 def test_put_timeout_waits_for_capacity(make_pair):
@@ -204,7 +238,9 @@ def test_failed_decode_is_acknowledged_and_next_message_succeeds(make_pair):
     sender, receiver = make_pair()
     sender.put(42)
     name = next(iter(sender._blocks))
-    sender._blocks[name].buf[0] = ord("!")
+    corrupt = SharedMemory(name=name)
+    corrupt.buf[0] = ord("!")
+    corrupt.close()
     with pytest.raises(pickle.UnpicklingError):
         receiver.get(timeout=3)
     assert sender.wait_for_all_ack(timeout=3)

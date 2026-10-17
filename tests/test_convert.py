@@ -242,6 +242,15 @@ def test_cleanup_tolerates_already_unlinked_blocks():
     assert_unlinked(info.name)
 
 
+def test_freed_block_reports_a_clear_error():
+    handle, info = serialize(42)
+    release_shared_memory(handle)
+    with pytest.raises(FileNotFoundError, match="freed before it was received") as caught:
+        deserialize(info)
+    assert caught.value.filename == info.name
+    assert isinstance(caught.value.__cause__, FileNotFoundError)
+
+
 def test_cleanup_ignores_names_that_are_already_gone():
     # Windows never raises here because unlink is a no-op, so simulate POSIX.
     handle = Mock()

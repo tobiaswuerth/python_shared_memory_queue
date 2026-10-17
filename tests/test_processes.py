@@ -193,6 +193,35 @@ raise SystemExit(process.exitcode)
 """
 
 
+LOW_FILE_LIMIT = """
+import resource
+
+from py_sharedmemory import create_shared_memory_pair
+
+# macOS defaults to 256 open files; unread messages must not hold descriptors.
+resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+sender, receiver = create_shared_memory_pair(0)
+for index in range(1_000):
+    sender.put(index)
+assert [receiver.get(timeout=10) for _ in range(1_000)] == list(range(1_000))
+assert sender.wait_for_all_ack(timeout=10)
+sender.close()
+receiver.close()
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-descriptor limits")
+def test_unread_messages_hold_no_file_descriptors():
+    result = subprocess.run(
+        [sys.executable, "-c", LOW_FILE_LIMIT],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 UNREAD_AT_EXIT = """
 from py_sharedmemory import create_shared_memory_pair
 

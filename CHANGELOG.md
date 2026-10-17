@@ -1,11 +1,23 @@
 # Changelog
 
+## 4.1.1
+
+- Unread messages no longer hold file descriptors on Linux and macOS: the sender unmaps
+  each block right after writing it. Unbounded pairs previously failed with
+  `Too many open files` after about 120 unread messages under macOS's default limit.
+- Cap outstanding messages at the metadata queue's limit (32,767 on macOS), so a blocking
+  `put` on an unbounded pair waits instead of raising `queue.Full`.
+- Explain a freed block in the receiver's `FileNotFoundError`, which happens when the
+  sender closes before a message is read.
+
 ## 4.1.0
 
 - Warn with a `RuntimeWarning` when leaving a `with sender:` block or exiting the
   producing process discards unacknowledged messages, so a forgotten
   `wait_for_all_ack()` no longer loses data silently. Explicit `close()` calls and
   exits caused by exceptions stay silent, and closing still never blocks.
+- Collect garbage between tests to avoid Python 3.12 resource-tracker reentrancy errors,
+  and add a stress test that checks every byte across consumer processes.
 
 ## 4.0.0
 

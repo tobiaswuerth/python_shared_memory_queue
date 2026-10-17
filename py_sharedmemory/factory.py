@@ -21,8 +21,7 @@ def create_shared_memory_pair(
 
     Args:
         capacity: Maximum messages sent but not yet received and freed; `put` blocks
-            when it is reached. `0` or `None` means unbounded, but on Linux and macOS
-            every unread message also holds two open file descriptors.
+            when it is reached. `0` or `None` means unbounded.
         ctx: Multiprocessing context for the underlying queues, such as
             `multiprocessing.get_context("spawn")`. Defaults to the default context;
             use the same context to start the worker processes.

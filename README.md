@@ -140,9 +140,7 @@ consumer = ctx.Process(target=consume, args=(receiver,))
 
 `capacity` counts messages that were sent but not yet received and freed. When it is
 reached, `put()` blocks, so a fast producer cannot exhaust memory. Shared-memory use is
-at most about `capacity × message size`. `capacity=0` or `None` means unbounded; prefer
-a limit, because unread messages also hold open files on Linux and macOS (see the
-platform notes below).
+at most about `capacity × message size`. `capacity=0` or `None` means unbounded.
 
 ### Timeouts and non-blocking calls
 
@@ -246,19 +244,22 @@ with `OSError: [Errno 28] No space left on device` or crash with `SIGBUS`.
 **Linux:** outside containers, `/dev/shm` usually defaults to half of physical RAM.
 
 **macOS:** fully supported and tested on Apple Silicon. The default start method is
-`spawn`, so guard the entry point with `if __name__ == "__main__":`.
-
-**Open-file limit (Linux and macOS):** each unread message keeps two file descriptors
-open in the producer until it is received. macOS allows 256 per process by default and
-Linux usually 1,024, so an unbounded pair fails with `OSError: [Errno 24] Too many open
-files` after roughly 120 or 500 unread messages. Set a `capacity` well below that, or
-raise the limit with `ulimit -n`. The sender stays usable after this error.
+`spawn`, so guard the entry point with `if __name__ == "__main__":`. An unbounded pair
+holds at most 32,767 unread messages, the limit of macOS semaphores; beyond that `put`
+waits or raises `queue.Full` like a full bounded pair.
 
 **Windows:** shared memory is backed by the page file, and each block disappears once
 the last handle closes, so nothing can leak after a crash.
 
 **"resource_tracker: There appear to be N leaked shared_memory objects":** fixed in
 3.0.1. Upgrade if you see this warning with the `fork` start method.
+
+**`FileNotFoundError: Shared-memory block was freed before it was received`:** the
+producer closed or exited before this message was read. Call `wait_for_all_ack()` before
+closing the sender; the sender also warns when this happens.
+
+**`OSError: [Errno 24] Too many open files` with many unread messages:** fixed in 4.1.1,
+where unread messages no longer hold file descriptors.
 
 **`RuntimeError: A shared-memory pair supports one producing process`:** a second
 process called `put`. Create a separate pair for each producer process.
