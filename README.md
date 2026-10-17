@@ -1,5 +1,15 @@
 # py-sharedmemory
 
+[![CI](https://github.com/tobiaswuerth/python_shared_memory_queue/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tobiaswuerth/python_shared_memory_queue/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/py-sharedmemory)](https://pypi.org/project/py-sharedmemory/)
+[![Python](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftobiaswuerth%2Fpython_shared_memory_queue%2Fmain%2Fpyproject.toml&query=%24.project%5B%27requires-python%27%5D&label=python&logo=python&logoColor=white)](https://pypi.org/project/py-sharedmemory/)
+[![Downloads](https://img.shields.io/pypi/dm/py-sharedmemory)](https://pypistats.org/packages/py-sharedmemory)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/tobiaswuerth/python_shared_memory_queue/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/tobiaswuerth/python_shared_memory_queue)](LICENSE)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
+
 Send large Python objects between processes with less pipe I/O.
 
 Originally built to reduce the heavy Windows pipe I/O and uneven throughput caused by
@@ -8,7 +18,8 @@ queues carry only small metadata, avoiding bulk transfers through the pipe.
 
 Useful for **ML pipelines, reinforcement-learning actors and replay buffers,
 scientific computing, and image/video processing**. Supports pickleable Python
-objects with familiar `put/get` calls. No runtime dependencies. Python 3.11+.
+objects with familiar `put/get` calls. No runtime dependencies, fully typed.
+Python 3.11+ on Linux, macOS, and Windows.
 
 ```sh
 pip install py-sharedmemory
@@ -61,11 +72,34 @@ closing either endpoint. Received data stays valid after cleanup; arrays preserv
 
 A [complete example](examples/basic.py) includes error handling.
 
-## Test and benchmark
+### API
+
+| Call | Behavior |
+| --- | --- |
+| `create_shared_memory_pair(capacity=0, *, ctx=None)` | Returns `(sender, receiver)` built from one multiprocessing context. |
+| `sender.put(obj, block=True, timeout=None)` / `put_nowait(obj)` | Copies `obj` into a new shared-memory block; raises `queue.Full`. |
+| `sender.wait_for_all_ack(timeout=None)` | Waits until every block is received and freed; `False` on timeout. |
+| `receiver.get(block=True, timeout=None)` / `get_nowait()` | Returns an independent local copy; raises `queue.Empty`. |
+| `close()`, `closed`, `with endpoint:` | Both endpoints; using a closed endpoint raises `BrokenPipeError`. |
+
+## Development
 
 ```sh
-python -m pip install -e ".[test,benchmark]"
-python -m pytest --cov=memory
+python -m pip install -e ".[dev]"
+pre-commit install
+python -m pytest --cov
+pre-commit run --all-files
+```
+
+CI runs the tests on Linux, macOS, and Windows with Python 3.11–3.15 and requires
+100% branch coverage on each. Pre-commit runs Ruff, mypy (strict), and file checks.
+
+To release, update `__version__` in `memory/__init__.py` and the changelog, then
+publish a GitHub release tagged `vX.Y.Z`. The release workflow uploads it to PyPI.
+
+### Benchmark
+
+```sh
 python -m benchmarks.benchmark --sizes 16 100 1000 10000 100000 1000000 10000000 100000000 1000000000 10000000000 --repeats 5 --json benchmarks/results/windows-numpy.json
 python -m benchmarks.plot benchmarks/results/windows-numpy.json benchmarks/results/windows-numpy.png
 ```

@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.0.1
+
+- Fix resource-tracker leaks on Linux and macOS: receivers no longer register blocks they
+  attach to, so `fork` workers no longer accumulate tracker entries or print
+  "leaked shared_memory" warnings at exit.
+- Ship type hints (`py.typed`), checked with strict mypy; expose `memory.__version__`.
+- Support and test Python 3.15; test Linux, macOS, and Windows for every Python version.
+- Require 100% branch coverage; add pre-commit hooks, Dependabot, and a trusted-publishing
+  release workflow.
+
 ## 3.0.0
 
 - Python 3.11+, standard-library-only runtime.
