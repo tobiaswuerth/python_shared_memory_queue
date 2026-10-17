@@ -25,6 +25,8 @@ Python 3.11+ on Linux, macOS, and Windows.
 pip install py-sharedmemory
 ```
 
+Upgrading from 3.x: the import package is now `py_sharedmemory` (previously `memory`).
+
 ## Measured performance
 
 ![Transfer speed relative to multiprocessing.Queue, from 16 bytes to 10 GB](benchmarks/results/windows-numpy.png)
@@ -42,7 +44,7 @@ These measurements show transfer speed; I/O and stability depend on the workload
 
 ```python
 import multiprocessing as mp
-from memory import create_shared_memory_pair
+from py_sharedmemory import create_shared_memory_pair
 
 
 def produce(sender):
@@ -94,7 +96,7 @@ pre-commit run --all-files
 CI runs the tests on Linux, macOS, and Windows with Python 3.11–3.15 and requires
 100% branch coverage on each. Pre-commit runs Ruff, mypy (strict), and file checks.
 
-To release, update `__version__` in `memory/__init__.py` and the changelog, then
+To release, update `__version__` in `py_sharedmemory/__init__.py` and the changelog, then
 publish a GitHub release tagged `vX.Y.Z`. The release workflow uploads it to PyPI.
 
 ### Benchmark

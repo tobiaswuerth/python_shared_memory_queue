@@ -25,7 +25,7 @@ repos:
     rev: v2.4.0
     hooks:
       - id: mypy
-        files: ^memory/
+        files: ^py_sharedmemory/
         args: []
         pass_filenames: false
 

@@ -3,23 +3,23 @@ import sys
 from importlib.metadata import version
 from pathlib import Path
 
-import memory
+import py_sharedmemory
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_public_api():
-    assert set(memory.__all__) == {
+    assert set(py_sharedmemory.__all__) == {
         "SharedMemoryReceiver",
         "SharedMemorySender",
         "__version__",
         "create_shared_memory_pair",
     }
-    assert (ROOT / "memory" / "py.typed").is_file()
+    assert (ROOT / "py_sharedmemory" / "py.typed").is_file()
 
 
 def test_version_matches_distribution_metadata():
-    assert memory.__version__ == version("py-sharedmemory")
+    assert py_sharedmemory.__version__ == version("py-sharedmemory")
 
 
 def test_basic_example_runs():

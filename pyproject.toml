@@ -61,13 +61,13 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["memory"]
+packages = ["py_sharedmemory"]
 
 [tool.setuptools.dynamic]
-version = { attr = "memory.__version__" }
+version = { attr = "py_sharedmemory.__version__" }
 
 [tool.setuptools.package-data]
-memory = ["py.typed"]
+py_sharedmemory = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -78,7 +78,7 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
-source = ["memory"]
+source = ["py_sharedmemory"]
 
 [tool.coverage.report]
 show_missing = true
@@ -97,4 +97,4 @@ allowed-confusables = ["×"]
 python_version = "3.11"
 strict = true
 warn_unreachable = true
-files = ["memory"]
+files = ["py_sharedmemory"]

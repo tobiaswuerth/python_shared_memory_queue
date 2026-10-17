@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.0.0
+
+- **Breaking:** the import package is renamed from `memory` to `py_sharedmemory` to match the
+  distribution name. `memory` clashed with the unrelated `memory` package on PyPI and with
+  projects' own `memory` modules. Upgrade by replacing `from memory import ...` with
+  `from py_sharedmemory import ...`; the API is unchanged and no alias is kept.
+
 ## 3.0.1
 
 - Fix resource-tracker leaks on Linux and macOS: receivers no longer register blocks they

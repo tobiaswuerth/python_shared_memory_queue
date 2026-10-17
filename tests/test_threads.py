@@ -4,7 +4,7 @@ from queue import Full
 
 import pytest
 
-from memory import sender as sender_module
+from py_sharedmemory import sender as sender_module
 
 from .helpers import assert_unlinked
 

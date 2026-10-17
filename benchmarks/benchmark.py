@@ -11,7 +11,7 @@ from contextlib import redirect_stderr
 from datetime import UTC, datetime
 from pathlib import Path
 
-from memory import create_shared_memory_pair
+from py_sharedmemory import create_shared_memory_pair
 
 
 def _receive(receiver, count, warmup, control, size):

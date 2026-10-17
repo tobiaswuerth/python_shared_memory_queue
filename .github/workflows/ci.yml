@@ -80,7 +80,7 @@ jobs:
       - name: Check wheel contents
         run: |
           python -m zipfile -l dist/*.whl | tee wheel-contents.txt
-          grep -q "memory/py.typed" wheel-contents.txt
+          grep -q "py_sharedmemory/py.typed" wheel-contents.txt
       - name: Test source distribution
         run: |
           python - <<'PY'
