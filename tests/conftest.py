@@ -1,8 +1,18 @@
+import gc
 import multiprocessing as mp
 
 import pytest
 
 from py_sharedmemory import create_shared_memory_pair
+
+
+@pytest.fixture(autouse=True)
+def collect_garbage():
+    # Queues left in reference cycles finalize their semaphores whenever the collector
+    # runs. On Python 3.12 that raises ReentrantCallError if it interrupts this thread
+    # inside the resource tracker, so collect at a safe point after every test.
+    yield
+    gc.collect()
 
 
 @pytest.fixture

@@ -11,8 +11,10 @@ from .helpers import (
     consume,
     exit_with_unreceived_data,
     join_process,
+    make_payload,
     produce,
     try_foreign_sender,
+    verify_payloads,
 )
 
 
@@ -83,6 +85,32 @@ def test_multiple_consumer_processes(make_pair, ctx):
         received = [index for _ in consumers for index in results.get(timeout=10)]
         assert sorted(received) == list(range(60))
         assert sender.wait_for_all_ack(timeout=10)
+        for process in consumers:
+            join_process(process)
+    finally:
+        for process in consumers:
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+        results.close()
+        results.join_thread()
+
+
+def test_large_messages_arrive_intact_across_consumer_processes(make_pair, ctx):
+    sender, receiver = make_pair(4, ctx=ctx)
+    results = ctx.Queue()
+    consumers = [ctx.Process(target=verify_payloads, args=(receiver, results)) for _ in range(3)]
+    for process in consumers:
+        process.start()
+    try:
+        for index in range(60):
+            sender.put((index, make_payload(index)), timeout=10)
+        for _ in consumers:
+            sender.put(None, timeout=10)
+        received = dict(results.get(timeout=15) for _ in range(60))
+        assert sender.wait_for_all_ack(timeout=10)
+        # Every byte of every payload is checked in the consumer that received it.
+        assert received == dict.fromkeys(range(60), True)
         for process in consumers:
             join_process(process)
     finally:

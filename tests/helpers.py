@@ -54,6 +54,31 @@ def consume(receiver, count, results):
         results.put(values)
 
 
+PAYLOAD_BYTES = 1_000_000
+
+
+def make_payload(index):
+    """Alternate in-band bytes and out-of-band NumPy buffers with index-specific content."""
+    if index % 2:
+        return bytes([index % 251]) * PAYLOAD_BYTES
+    import numpy as np
+
+    return np.full(PAYLOAD_BYTES // 4, index, dtype=np.int32)
+
+
+def payload_intact(index, payload):
+    if isinstance(payload, bytes):
+        return len(payload) == PAYLOAD_BYTES and payload.count(index % 251) == PAYLOAD_BYTES
+    return payload.shape == (PAYLOAD_BYTES // 4,) and bool((payload == index).all())
+
+
+def verify_payloads(receiver, results):
+    with receiver:
+        while (message := receiver.get(timeout=10)) is not None:
+            index, payload = message
+            results.put((index, payload_intact(index, payload)))
+
+
 def exit_with_unreceived_data(sender, ready_to_exit):
     # test_process_exit_with_unread_messages_warns covers the exit warning itself.
     warnings.filterwarnings("ignore", "Closing the sender discards", RuntimeWarning)
