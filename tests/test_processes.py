@@ -165,6 +165,26 @@ raise SystemExit(process.exitcode)
 """
 
 
+UNREAD_AT_EXIT = """
+from py_sharedmemory import create_shared_memory_pair
+
+sender, receiver = create_shared_memory_pair(1)
+sender.put(b"never received")
+"""
+
+
+def test_process_exit_with_unread_messages_warns():
+    result = subprocess.run(
+        [sys.executable, "-c", UNREAD_AT_EXIT],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "RuntimeWarning: Closing the sender discards 1 unacknowledged message" in result.stderr
+
+
 @pytest.mark.skipif("fork" not in mp.get_all_start_methods(), reason="Requires fork")
 def test_forked_producer_leaves_no_resource_tracker_entries():
     # A fresh interpreter has no resource tracker running before the fork.

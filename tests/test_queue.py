@@ -3,6 +3,7 @@ import os
 import pickle
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from queue import Empty, Full
@@ -267,6 +268,69 @@ def test_context_managers_close_unused_endpoints(make_pair):
         assert sender.wait_for_all_ack(timeout=0)
     assert sender.closed
     assert receiver.closed
+
+
+def send_then_leave(sender, count, *, fail=False):
+    """Leave a `with sender:` block without draining; return the abandoned block names."""
+    with sender:
+        for index in range(count):
+            sender.put(index)
+        if fail:
+            raise ValueError("producer failed")
+        return list(sender._blocks)
+
+
+@pytest.mark.parametrize(
+    ("count", "text"),
+    [(1, "1 unacknowledged message that"), (2, "2 unacknowledged messages that")],
+)
+def test_clean_with_exit_warns_about_discarded_messages(make_pair, count, text):
+    sender, _ = make_pair(0)
+    with pytest.warns(RuntimeWarning, match=f"discards {text}") as caught:
+        names = send_then_leave(sender, count)
+    assert caught[0].filename == __file__  # Points at the user's `with` statement
+    assert sender.closed
+    for name in names:
+        assert_unlinked(name)
+
+
+@pytest.mark.parametrize("ending", ["drained", "exception", "close"])
+def test_drained_failed_and_explicit_closes_do_not_warn(make_pair, ending):
+    sender, receiver = make_pair()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        if ending == "drained":
+            with sender:
+                sender.put(1)
+                assert receiver.get(timeout=3) == 1
+                assert sender.wait_for_all_ack(timeout=3)
+        elif ending == "exception":
+            with pytest.raises(ValueError, match="producer failed"):
+                send_then_leave(sender, 1, fail=True)
+        else:
+            sender.put(1)
+            sender.close()
+    assert sender.closed
+
+
+def test_process_exit_cleanup_warns_about_discarded_messages(make_pair):
+    sender, _ = make_pair()
+    sender.put(1)
+    with pytest.warns(RuntimeWarning, match="discards 1 unacknowledged message"):
+        sender._finalizer()
+    assert sender.closed
+
+
+def test_warning_as_error_still_closes_the_sender(make_pair):
+    sender, _ = make_pair()
+    sender.put(1)
+    name = next(iter(sender._blocks))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(RuntimeWarning, match="unacknowledged"), sender:
+            pass
+    assert sender.closed
+    assert_unlinked(name)
 
 
 def test_ack_channel_failure_closes_without_joining_its_own_thread():

@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.1.0
+
+- Warn with a `RuntimeWarning` when leaving a `with sender:` block or exiting the
+  producing process discards unacknowledged messages, so a forgotten
+  `wait_for_all_ack()` no longer loses data silently. Explicit `close()` calls and
+  exits caused by exceptions stay silent, and closing still never blocks.
+
 ## 4.0.0
 
 - **Breaking:** the import package is renamed from `memory` to `py_sharedmemory` to match the

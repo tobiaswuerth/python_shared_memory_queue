@@ -180,6 +180,11 @@ with sender:
         raise TimeoutError("Consumer did not receive everything")
 ```
 
+Closing never blocks. If a `with sender:` block or the producing process ends normally
+while messages are still unacknowledged, they are discarded and the sender emits a
+`RuntimeWarning`, so forgetting to drain does not lose data silently. An explicit
+`close()` or an exception leaving the `with` block discards without a warning.
+
 When both endpoints live in one process, drain before closing either of them. A sentinel
 such as `None` is a simple way to tell consumers that the stream has ended.
 
@@ -199,6 +204,7 @@ copy; other views, such as strided slices, arrive as contiguous copies.
 | `BrokenPipeError` | The endpoint is closed, or the producer's acknowledgement channel failed. |
 | `RuntimeError` | A second process tries to produce, or a used sender is passed to another process. |
 | Pickling errors | The object cannot be pickled or unpickled. Both endpoints stay usable, and failed messages are still freed. |
+| `RuntimeWarning` (warning) | A `with sender:` block or the producing process ended normally and discarded unacknowledged messages. |
 
 ## API reference
 
@@ -215,9 +221,9 @@ for the underlying queues; it defaults to `multiprocessing.get_context()`.
 | `put(obj, block=True, timeout=None)` | Copy `obj` into a new shared-memory block and send it. |
 | `put_nowait(obj)` | `put(obj, block=False)`. |
 | `wait_for_all_ack(timeout=None) -> bool` | Wait until every message is received and freed; `False` on timeout. |
-| `close()` | Free unread messages and release resources. Runs automatically at normal process exit. |
+| `close()` | Free unread messages silently and release resources. Runs automatically at normal process exit. |
 | `closed` | Whether the sender is closed. |
-| `with sender:` | Closes the sender on exit. |
+| `with sender:` | Closes the sender on exit; warns if a clean exit discards unacknowledged messages. |
 
 ### `SharedMemoryReceiver`
 

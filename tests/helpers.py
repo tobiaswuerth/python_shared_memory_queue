@@ -1,4 +1,5 @@
 import multiprocessing.shared_memory as sm
+import warnings
 from queue import Queue
 
 import pytest
@@ -54,6 +55,8 @@ def consume(receiver, count, results):
 
 
 def exit_with_unreceived_data(sender, ready_to_exit):
+    # test_process_exit_with_unread_messages_warns covers the exit warning itself.
+    warnings.filterwarnings("ignore", "Closing the sender discards", RuntimeWarning)
     sender.put(bytearray(65_536))
     if not ready_to_exit.wait(10):
         raise TimeoutError("Parent did not read the metadata")
@@ -61,11 +64,15 @@ def exit_with_unreceived_data(sender, ready_to_exit):
 
 
 def abandon_metadata(sender, result_pipe):
-    with sender:
-        for _ in range(1_000):
-            sender.put(b"x")
-        result_pipe.send(list(sender._blocks))
-        result_pipe.close()
+    def abandon():
+        with sender:
+            for _ in range(1_000):
+                sender.put(b"x")
+            result_pipe.send(list(sender._blocks))
+            result_pipe.close()
+
+    with pytest.warns(RuntimeWarning, match="discards 1000 unacknowledged"):
+        abandon()
 
 
 def try_foreign_sender(sender, result_pipe):

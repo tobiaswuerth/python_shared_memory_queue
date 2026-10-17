@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+import warnings
 from multiprocessing.queues import Queue
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.util import Finalize
@@ -33,7 +34,9 @@ class SharedMemorySender:
     Each `put` copies one object into a new shared-memory block that this sender owns
     until a receiver acknowledges it. The sender is thread-safe, but only one process
     may produce: pass it to that process as a `Process` argument before the first
-    `put`. Call `wait_for_all_ack` before `close`, because closing frees unread blocks.
+    `put`. Call `wait_for_all_ack` before closing, because closing frees unread blocks.
+    Leaving a `with` block or exiting the process normally while messages are still
+    unacknowledged emits a `RuntimeWarning`.
     """
 
     def __init__(
@@ -112,8 +115,9 @@ class SharedMemorySender:
     def close(self) -> None:
         """Free unread messages, stop the acknowledgement thread, and close the queues.
 
-        Idempotent. Unread messages are lost, so drain with `wait_for_all_ack` first.
-        Also runs automatically when the producing process exits normally.
+        Idempotent. Unread messages are discarded silently, so drain with
+        `wait_for_all_ack` first. Also runs automatically when the producing process
+        exits normally, warning if that discards messages.
         """
         self._check_process()
         errors: list[Exception] = []
@@ -157,7 +161,12 @@ class SharedMemorySender:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        try:
+            # An exception already signals the failure; only warn on a clean exit.
+            if exc_type is None:
+                self._warn_if_discarding()
+        finally:
+            self.close()
 
     def __getstate__(self) -> dict[str, Any]:
         if self._process_id is not None:
@@ -173,6 +182,26 @@ class SharedMemorySender:
     def _check_process(self) -> None:
         if self._process_id is not None and self._process_id != os.getpid():
             raise RuntimeError("An initialized sender cannot be used in another process")
+
+    def _close_at_exit(self) -> None:
+        try:
+            self._warn_if_discarding()
+        finally:
+            self.close()
+
+    def _warn_if_discarding(self) -> None:
+        # Explicit close() discards silently; implicit closes make the data loss visible.
+        self._check_process()
+        with self._condition:
+            unacknowledged = 0 if self._closed else len(self._blocks)
+        if unacknowledged:
+            noun = "message" if unacknowledged == 1 else "messages"
+            warnings.warn(
+                f"Closing the sender discards {unacknowledged} unacknowledged {noun} that "
+                "receivers may not have read; call wait_for_all_ack() first",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -243,7 +272,7 @@ class SharedMemorySender:
             self._ack_thread = threading.Thread(
                 target=self._process_acknowledgements, name="shared-memory-acks", daemon=True
             )
-            self._finalizer = Finalize(self, self.close, exitpriority=10)
+            self._finalizer = Finalize(self, self._close_at_exit, exitpriority=10)
             self._ack_thread.start()
         except BaseException:
             if self._finalizer is not None:
