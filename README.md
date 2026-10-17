@@ -5,52 +5,53 @@
 [![Python](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftobiaswuerth%2Fpython_shared_memory_queue%2Fmain%2Fpyproject.toml&query=%24.project%5B%27requires-python%27%5D&label=python&logo=python&logoColor=white)](https://pypi.org/project/py-sharedmemory/)
 [![Downloads](https://img.shields.io/pypi/dm/py-sharedmemory)](https://pypistats.org/packages/py-sharedmemory)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/tobiaswuerth/python_shared_memory_queue/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/tobiaswuerth/python_shared_memory_queue)](LICENSE)
+[![License](https://img.shields.io/github/license/tobiaswuerth/python_shared_memory_queue)](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
 
-Send large Python objects between processes with less pipe I/O.
+**A fast `multiprocessing.Queue` alternative for large Python objects and NumPy arrays.**
+Payloads travel between processes through shared memory instead of pipes; the queues
+underneath carry only a few bytes of metadata per message. Multi-megabyte batches,
+images, and simulation states arrive up to 2× faster, and transfers too large for
+`multiprocessing.Queue` still work.
 
-Originally built to reduce the heavy Windows pipe I/O and uneven throughput caused by
-large `multiprocessing.Queue` transfers. Payloads travel through shared memory;
-queues carry only small metadata, avoiding bulk transfers through the pipe.
+- **Familiar API:** `put` / `get` with `block`, `timeout`, `put_nowait` / `get_nowait`,
+  `queue.Full`, and `queue.Empty`.
+- **Any picklable object:** NumPy arrays and other buffers use pickle protocol 5
+  out-of-band buffers, so they are copied straight into shared memory.
+- **Bounded memory:** a capacity limit applies backpressure, and each shared-memory
+  block is freed once its message is received.
+- **One producer, many consumers:** consumer processes and threads share one receiver.
+- **Portable:** Linux, macOS, and Windows; `spawn`, `fork`, and `forkserver`; Python 3.11–3.15.
+- **Lightweight:** no dependencies, fully typed (PEP 561), and 100% test coverage.
 
-Useful for **ML pipelines, reinforcement-learning actors and replay buffers,
-scientific computing, and image/video processing**. Supports pickleable Python
-objects with familiar `put/get` calls. No runtime dependencies, fully typed.
-Python 3.11+ on Linux, macOS, and Windows.
+Built for **machine-learning data pipelines, reinforcement-learning actors and replay
+buffers, scientific computing, and image or video processing**, where large payloads
+make pipe I/O the bottleneck.
+
+## Installation
 
 ```sh
 pip install py-sharedmemory
 ```
 
-Upgrading from 3.x: the import package is now `py_sharedmemory` (previously `memory`).
+> **Upgrading from 3.x?** The import package is now `py_sharedmemory` (previously
+> `memory`). Replace `from memory import ...` with `from py_sharedmemory import ...`;
+> nothing else changed.
 
-## Measured performance
-
-![Transfer speed relative to multiprocessing.Queue, from 16 bytes to 10 GB](benchmarks/results/windows-numpy.png)
-
-About **2× faster at 1–10 MB**; **10 GB transferred in 8.0 s**.
-`mp.Queue` failed at 10 GB (Windows error 87). Small messages favor standard queues.
-
-Core i9-14900K, 191.8 GiB RAM, Windows 11, Python 3.12.10, NumPy 2.5.3.
-2026-10-08; contiguous float32 arrays; `spawn`; capacity 2; median of 5 runs,
-excluding startup and warmup. Up to 1,000 messages or 512 MiB/run, at least one
-message. GB = 10⁹ bytes. [Raw results](benchmarks/results/windows-numpy.json).
-These measurements show transfer speed; I/O and stability depend on the workload.
-
-## Usage
+## Quick start
 
 ```python
 import multiprocessing as mp
+
 from py_sharedmemory import create_shared_memory_pair
 
 
 def produce(sender):
     with sender:
         sender.put({"step": 42, "frames": bytearray(16_000_000)})
-        sender.wait_for_all_ack()
+        sender.wait_for_all_ack()  # Keep the data alive until it is received
 
 
 if __name__ == "__main__":
@@ -64,46 +65,210 @@ if __name__ == "__main__":
     sender.close()
 ```
 
-One producing process per pair; multiple threads and consumers are supported.
-Pass endpoints to workers before use. `put/get` support `block`, `timeout`, and
-`*_nowait`. Capacity counts outstanding messages; 0/`None` is unbounded.
+More complete, runnable programs:
 
-**Drain before producer close or exit:** `wait_for_all_ack(timeout=...)` returns
-`False` on timeout. Close discards unread data. Within one process, drain before
-closing either endpoint. Received data stays valid after cleanup; arrays preserve mutability.
+- [`examples/basic.py`](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/examples/basic.py):
+  a producer process with timeouts and error handling.
+- [`examples/numpy_batches.py`](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/examples/numpy_batches.py):
+  streaming NumPy batches with backpressure and an end-of-stream marker.
+- [`examples/worker_pool.py`](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/examples/worker_pool.py):
+  fanning large tasks out to several consumer processes.
 
-A [complete example](examples/basic.py) includes error handling.
+## When to use it
 
-### API
+Use py-sharedmemory when individual messages are **around 1 MB or larger**: NumPy
+arrays, image or video frames, RL rollouts, large `bytes`, or big nested objects. It also
+helps where large `multiprocessing.Queue` transfers cause heavy pipe I/O or uneven
+throughput, which is especially noticeable on Windows.
 
-| Call | Behavior |
+Prefer `multiprocessing.Queue` for small messages. Below about 100 kB, creating and
+freeing a shared-memory block (about 0.09 ms per message) costs more than the pipe.
+
+To let several processes read and write **the same** array in place, use
+[`multiprocessing.shared_memory`](https://docs.python.org/3/library/multiprocessing.shared_memory.html)
+directly. py-sharedmemory delivers an independent copy of each message.
+
+## Performance
+
+![Transfer speed relative to multiprocessing.Queue, from 16 bytes to 10 GB](https://raw.githubusercontent.com/tobiaswuerth/python_shared_memory_queue/main/benchmarks/results/windows-numpy.png)
+
+| Payload per message | `multiprocessing.Queue` | py-sharedmemory | Speedup |
+| --- | ---: | ---: | ---: |
+| 100 kB | 2,315 MiB/s | 797 MiB/s | 0.34× |
+| 1 MB | 1,022 MiB/s | 2,056 MiB/s | **2.01×** |
+| 10 MB | 1,177 MiB/s | 2,387 MiB/s | **2.03×** |
+| 100 MB | 1,034 MiB/s | 1,820 MiB/s | **1.76×** |
+| 1 GB | 855 MiB/s | 1,262 MiB/s | **1.47×** |
+| 10 GB | failed (Windows error 87) | 8.0 s per message | — |
+
+Core i9-14900K, 191.8 GiB RAM, Windows 11, Python 3.12.10, NumPy 2.5.3, measured on
+2026-10-08. Contiguous float32 arrays, `spawn`, capacity 2, median of 5 runs excluding
+startup and warmup; up to 1,000 messages or 512 MiB per run, at least one message.
+1 GB = 10⁹ bytes. See the [raw results](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/benchmarks/results/windows-numpy.json).
+These numbers show transfer speed; I/O load and stability depend on the workload.
+
+## How it works
+
+1. `put()` pickles the object with protocol 5. Large buffers, such as NumPy array data,
+   stay out-of-band, and everything is copied into one new shared-memory block.
+2. Only the block's name and buffer sizes travel through a `multiprocessing.Queue`.
+3. `get()` attaches to the block, copies the data into local memory, unpickles it, and
+   sends an acknowledgement back.
+4. A background thread in the producer frees the block when the acknowledgement
+   arrives. `capacity` limits how many blocks can be outstanding at once.
+
+Received objects never point into shared memory, so they stay valid after the block is
+freed and can be modified freely.
+
+## Usage guide
+
+### Passing endpoints to processes
+
+Create the pair in the parent process and pass the endpoints to workers as `Process`
+arguments, the same way as a `multiprocessing.Queue`. Use the same context for the pair
+and the processes. A sender can be passed to another process only **before** its first
+`put`; after that it belongs to the process that used it.
+
+```python
+ctx = mp.get_context("spawn")  # "fork" and "forkserver" also work
+sender, receiver = create_shared_memory_pair(capacity=4, ctx=ctx)
+producer = ctx.Process(target=produce, args=(sender,))
+consumer = ctx.Process(target=consume, args=(receiver,))
+```
+
+### Capacity and backpressure
+
+`capacity` counts messages that were sent but not yet received and freed. When it is
+reached, `put()` blocks, so a fast producer cannot exhaust memory. Shared-memory use is
+at most about `capacity × message size`. `capacity=0` or `None` means unbounded; prefer
+a limit, because unread messages also hold open files on Linux and macOS (see the
+platform notes below).
+
+### Timeouts and non-blocking calls
+
+```python
+from queue import Empty, Full
+
+try:
+    sender.put(batch, timeout=5)  # Wait up to 5 s for capacity
+except Full:
+    ...
+
+try:
+    item = receiver.get_nowait()  # Same as get(block=False)
+except Empty:
+    ...
+```
+
+### Multiple consumers and threads
+
+Each message is delivered to exactly one consumer. Several consumer processes can share
+one receiver, as in [`examples/worker_pool.py`](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/examples/worker_pool.py),
+and both endpoints are thread-safe. Only one process may produce per pair; for several
+producer processes, create one pair per producer.
+
+### Shutting down cleanly
+
+The producer owns every message until it is acknowledged, and `close()` frees unread
+messages. Before the producer closes or exits:
+
+```python
+with sender:
+    for item in items:
+        sender.put(item)
+    if not sender.wait_for_all_ack(timeout=30):
+        raise TimeoutError("Consumer did not receive everything")
+```
+
+When both endpoints live in one process, drain before closing either of them. A sentinel
+such as `None` is a simple way to tell consumers that the stream has ended.
+
+### NumPy arrays
+
+Arrays keep their dtype, shape, and writability. Read-only arrays stay read-only, and
+writable ones arrive as writable local copies. C- and Fortran-contiguous arrays keep
+their layout and are copied straight into shared memory without an intermediate pickle
+copy; other views, such as strided slices, arrive as contiguous copies.
+
+### Errors
+
+| Exception | Raised when |
 | --- | --- |
-| `create_shared_memory_pair(capacity=0, *, ctx=None)` | Returns `(sender, receiver)` built from one multiprocessing context. |
-| `sender.put(obj, block=True, timeout=None)` / `put_nowait(obj)` | Copies `obj` into a new shared-memory block; raises `queue.Full`. |
-| `sender.wait_for_all_ack(timeout=None)` | Waits until every block is received and freed; `False` on timeout. |
-| `receiver.get(block=True, timeout=None)` / `get_nowait()` | Returns an independent local copy; raises `queue.Empty`. |
-| `close()`, `closed`, `with endpoint:` | Both endpoints; using a closed endpoint raises `BrokenPipeError`. |
+| `queue.Full` | `put` found no capacity within `timeout` or with `block=False`. |
+| `queue.Empty` | `get` found no message within `timeout` or with `block=False`. |
+| `BrokenPipeError` | The endpoint is closed, or the producer's acknowledgement channel failed. |
+| `RuntimeError` | A second process tries to produce, or a used sender is passed to another process. |
+| Pickling errors | The object cannot be pickled or unpickled. Both endpoints stay usable, and failed messages are still freed. |
 
-## Development
+## API reference
 
-```sh
-python -m pip install -e ".[dev]"
-pre-commit install
-python -m pytest --cov
-pre-commit run --all-files
-```
+### `create_shared_memory_pair(capacity=0, *, ctx=None)`
 
-CI runs the tests on Linux, macOS, and Windows with Python 3.11–3.15 and requires
-100% branch coverage on each. Pre-commit runs Ruff, mypy (strict), and file checks.
+Returns a connected `(SharedMemorySender, SharedMemoryReceiver)`. `capacity` limits
+outstanding messages (`0` or `None` is unbounded). `ctx` is the multiprocessing context
+for the underlying queues; it defaults to `multiprocessing.get_context()`.
 
-To release, update `__version__` in `py_sharedmemory/__init__.py` and the changelog, then
-publish a GitHub release tagged `vX.Y.Z`. The release workflow uploads it to PyPI.
+### `SharedMemorySender`
 
-### Benchmark
+| Member | Description |
+| --- | --- |
+| `put(obj, block=True, timeout=None)` | Copy `obj` into a new shared-memory block and send it. |
+| `put_nowait(obj)` | `put(obj, block=False)`. |
+| `wait_for_all_ack(timeout=None) -> bool` | Wait until every message is received and freed; `False` on timeout. |
+| `close()` | Free unread messages and release resources. Runs automatically at normal process exit. |
+| `closed` | Whether the sender is closed. |
+| `with sender:` | Closes the sender on exit. |
 
-```sh
-python -m benchmarks.benchmark --sizes 16 100 1000 10000 100000 1000000 10000000 100000000 1000000000 10000000000 --repeats 5 --json benchmarks/results/windows-numpy.json
-python -m benchmarks.plot benchmarks/results/windows-numpy.json benchmarks/results/windows-numpy.png
-```
+### `SharedMemoryReceiver`
 
-The full benchmark needs enough RAM for several payload copies.
+| Member | Description |
+| --- | --- |
+| `get(block=True, timeout=None)` | Return the next object as an independent local copy. |
+| `get_nowait()` | `get(block=False)`. |
+| `close()` | Flush acknowledgements and close this process's handles. |
+| `closed` | Whether the receiver is closed. |
+| `with receiver:` | Closes the receiver on exit. |
+
+## Platform notes and troubleshooting
+
+**Docker and Kubernetes:** on Linux, shared memory lives in `/dev/shm`, which containers
+limit to 64 MB by default. Raise it to at least `capacity × largest message`, for example
+`docker run --shm-size=2g` or `shm_size: 2gb` in Docker Compose. In Kubernetes, mount an
+`emptyDir` volume with `medium: Memory` at `/dev/shm`. Otherwise the producer can fail
+with `OSError: [Errno 28] No space left on device` or crash with `SIGBUS`.
+
+**Linux:** outside containers, `/dev/shm` usually defaults to half of physical RAM.
+
+**macOS:** fully supported and tested on Apple Silicon. The default start method is
+`spawn`, so guard the entry point with `if __name__ == "__main__":`.
+
+**Open-file limit (Linux and macOS):** each unread message keeps two file descriptors
+open in the producer until it is received. macOS allows 256 per process by default and
+Linux usually 1,024, so an unbounded pair fails with `OSError: [Errno 24] Too many open
+files` after roughly 120 or 500 unread messages. Set a `capacity` well below that, or
+raise the limit with `ulimit -n`. The sender stays usable after this error.
+
+**Windows:** shared memory is backed by the page file, and each block disappears once
+the last handle closes, so nothing can leak after a crash.
+
+**"resource_tracker: There appear to be N leaked shared_memory objects":** fixed in
+3.0.1. Upgrade if you see this warning with the `fork` start method.
+
+**`RuntimeError: A shared-memory pair supports one producing process`:** a second
+process called `put`. Create a separate pair for each producer process.
+
+**`Can't pickle local object` or similar:** messages must be picklable. Lambdas, local
+functions, open files, and locks cannot be sent.
+
+## Contributing
+
+Bug reports, ideas, and pull requests are welcome. See
+[CONTRIBUTING.md](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/CONTRIBUTING.md)
+for the development setup, tests, and release process, and the
+[changelog](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/CHANGELOG.md)
+for version history. Report security issues privately as described in
+[SECURITY.md](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/SECURITY.md).
+
+## License
+
+[MIT](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/LICENSE) © Tobias Würth

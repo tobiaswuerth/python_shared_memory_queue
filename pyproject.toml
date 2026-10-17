@@ -5,21 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "py-sharedmemory"
 dynamic = ["version"]
-description = "Shared-memory queues for large Python objects with less pipe I/O"
+description = "Fast multiprocessing.Queue alternative that moves large Python objects and NumPy arrays through shared memory"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Tobias Würth" }]
 keywords = [
-    "queue",
-    "multiprocessing",
     "shared-memory",
-    "inter-process-communication",
+    "multiprocessing",
+    "queue",
+    "multiprocessing-queue",
     "ipc",
+    "inter-process-communication",
     "numpy",
-    "zero-copy",
     "pickle",
+    "data-pipeline",
+    "machine-learning",
+    "reinforcement-learning",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -44,9 +47,11 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/tobiaswuerth/python_shared_memory_queue"
+Documentation = "https://github.com/tobiaswuerth/python_shared_memory_queue#readme"
 Repository = "https://github.com/tobiaswuerth/python_shared_memory_queue"
 Changelog = "https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/CHANGELOG.md"
-"Bug Tracker" = "https://github.com/tobiaswuerth/python_shared_memory_queue/issues"
+Releases = "https://github.com/tobiaswuerth/python_shared_memory_queue/releases"
+Issues = "https://github.com/tobiaswuerth/python_shared_memory_queue/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7.4", "pytest-cov>=4.1", "pytest-timeout>=2.3", "numpy>=1.26"]

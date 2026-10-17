@@ -28,7 +28,13 @@ def _validate_capacity(capacity: int | None) -> None:
 
 
 class SharedMemorySender:
-    """Thread-safe sender for one producing process. Drain before closing."""
+    """Producing endpoint of a pair; create it with `create_shared_memory_pair`.
+
+    Each `put` copies one object into a new shared-memory block that this sender owns
+    until a receiver acknowledges it. The sender is thread-safe, but only one process
+    may produce: pass it to that process as a `Process` argument before the first
+    `put`. Call `wait_for_all_ack` before `close`, because closing frees unread blocks.
+    """
 
     def __init__(
         self,
@@ -54,10 +60,25 @@ class SharedMemorySender:
 
     @property
     def closed(self) -> bool:
+        """Whether `close` was called or the acknowledgement channel failed."""
         return self._closed
 
     def put(self, data: Any, block: bool = True, timeout: float | None = None) -> None:
-        """Send data; timeout limits waiting for capacity. Raises queue.Full."""
+        """Send a picklable object through shared memory.
+
+        Args:
+            data: Any object that pickle protocol 5 can serialize. NumPy arrays and
+                other buffers are copied out-of-band without an extra pickle copy.
+            block: Wait for capacity when `capacity` messages are outstanding.
+            timeout: Maximum seconds to wait for capacity; `None` waits forever.
+
+        Raises:
+            queue.Full: No capacity became available in time.
+            BrokenPipeError: The sender is closed.
+            RuntimeError: Called from a process other than the producing process.
+
+        Serialization errors propagate unchanged, and the sender stays usable.
+        """
         self._reserve_slot(block, timeout)
         try:
             allocation, message = serialize(data)
@@ -67,10 +88,18 @@ class SharedMemorySender:
         self._publish(allocation, message)
 
     def put_nowait(self, data: Any) -> None:
+        """Equivalent to `put(data, block=False)`."""
         self.put(data, block=False)
 
     def wait_for_all_ack(self, timeout: float | None = None) -> bool:
-        """Wait until outstanding memory is freed; return False on timeout."""
+        """Wait until every sent message has been received and its memory freed.
+
+        Returns:
+            `True` once nothing is outstanding, `False` if `timeout` seconds pass first.
+
+        Raises:
+            BrokenPipeError: The sender is closed, or closes while waiting.
+        """
         self._check_process()
         with self._condition:
             self._ensure_open()
@@ -81,7 +110,11 @@ class SharedMemorySender:
             return drained
 
     def close(self) -> None:
-        """Discard unread messages, stop the ack thread, and close local queues."""
+        """Free unread messages, stop the acknowledgement thread, and close the queues.
+
+        Idempotent. Unread messages are lost, so drain with `wait_for_all_ack` first.
+        Also runs automatically when the producing process exits normally.
+        """
         self._check_process()
         errors: list[Exception] = []
         with self._condition:

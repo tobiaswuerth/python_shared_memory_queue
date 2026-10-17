@@ -10,7 +10,12 @@ from .convert import SharedMemoryMessage, deserialize
 
 
 class SharedMemoryReceiver:
-    """Receive objects and acknowledge them even when decoding fails."""
+    """Consuming endpoint of a pair; create it with `create_shared_memory_pair`.
+
+    Several threads and processes may share one receiver; each message is delivered to
+    exactly one of them. Every message is acknowledged, even when decoding fails, so
+    the sender can free its memory.
+    """
 
     def __init__(self, data_queue: Queue[SharedMemoryMessage], ack_queue: Queue[str]) -> None:
         self._data_queue = data_queue
@@ -19,10 +24,26 @@ class SharedMemoryReceiver:
 
     @property
     def closed(self) -> bool:
+        """Whether `close` was called."""
         return self._closed
 
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
-        """Receive data; raise queue.Empty when no message arrives in time."""
+        """Receive the next object as an independent local copy.
+
+        Args:
+            block: Wait for a message when none is available.
+            timeout: Maximum seconds to wait; `None` waits forever.
+
+        Returns:
+            The object, which stays valid after the shared memory is freed. Arrays keep
+            their original writability.
+
+        Raises:
+            queue.Empty: No message arrived in time.
+            BrokenPipeError: The receiver is closed.
+
+        Unpickling errors propagate unchanged; the message is still acknowledged.
+        """
         if self._closed:
             raise BrokenPipeError("Receiver is closed")
         message = self._data_queue.get(block, timeout)
@@ -34,10 +55,14 @@ class SharedMemoryReceiver:
                 self._ack_queue.put_nowait(message.name)
 
     def get_nowait(self) -> Any:
+        """Equivalent to `get(block=False)`."""
         return self.get(block=False)
 
     def close(self) -> None:
-        """Close local queues and flush acknowledgements before returning."""
+        """Close this process's queue handles after flushing acknowledgements.
+
+        Idempotent. Other processes sharing the receiver are unaffected.
+        """
         if self._closed:
             return
         self._closed = True

@@ -6,6 +6,11 @@
   distribution name. `memory` clashed with the unrelated `memory` package on PyPI and with
   projects' own `memory` modules. Upgrade by replacing `from memory import ...` with
   `from py_sharedmemory import ...`; the API is unchanged and no alias is kept.
+- Rewrite the README as a user guide with an API reference, performance table,
+  Docker, macOS, open-file-limit, and troubleshooting notes, and absolute links so
+  images render on PyPI.
+- Document every public class and method; add NumPy streaming and worker-pool examples.
+- Add contributing and security guides, issue forms, and a pull request template.
 
 ## 3.0.1
 
