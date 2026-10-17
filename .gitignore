@@ -1,12 +1,24 @@
+# Environments
 .venv
+.venv-*
+venv
+
+# Python
 __pycache__
-.pytest_cache
-.vscode
-dist
-build
+*.py[cod]
 *.egg-info
-test_results
-.venv-linux
+build
+dist
+
+# Tooling caches and reports
 .coverage*
+coverage.xml
 htmlcov
+.mypy_cache
+.pytest_cache
 .ruff_cache
+test_results
+
+# Editors
+.vscode
+.idea
