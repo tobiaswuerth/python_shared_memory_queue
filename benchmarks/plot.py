@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 
 def plot(report, output):
@@ -68,11 +68,11 @@ def _size_label(size):
     return f"{size} B"
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path)
     parser.add_argument("output", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     plot(json.loads(args.results.read_text(encoding="utf-8")), args.output)
 
 

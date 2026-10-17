@@ -1,8 +1,10 @@
 import multiprocessing as mp
+import os
 import pickle
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from queue import Empty, Full
 from unittest.mock import Mock
 
@@ -47,6 +49,17 @@ def test_factory_endpoint_failure_closes_both_queues(monkeypatch, endpoint):
         factory.create_shared_memory_pair(1, ctx=ctx)
     for queue in queues:
         queue.close.assert_called_once()
+
+
+@pytest.mark.parametrize("share", [False, True])
+def test_factory_starts_a_shared_resource_tracker_only_when_needed(monkeypatch, share):
+    from memory import factory
+
+    ensure_running = Mock()
+    monkeypatch.setattr(factory, "_SHARE_RESOURCE_TRACKER", share)
+    monkeypatch.setattr(factory.resource_tracker, "ensure_running", ensure_running)
+    factory.create_shared_memory_pair(1, ctx=Mock())
+    assert ensure_running.called is share
 
 
 @pytest.mark.parametrize("capacity", [0, None])
@@ -229,7 +242,8 @@ def test_close_is_idempotent_and_releases_unread_blocks(make_pair):
     names = list(sender._blocks)
     sender.close()
     sender.close()
-    assert sender._finalizer is not None and not sender._finalizer.still_active()
+    assert sender._finalizer is not None
+    assert not sender._finalizer.still_active()
     assert not sender._ack_thread.is_alive()
     for name in names:
         assert_unlinked(name)
@@ -251,7 +265,8 @@ def test_context_managers_close_unused_endpoints(make_pair):
     sender, receiver = make_pair()
     with sender, receiver:
         assert sender.wait_for_all_ack(timeout=0)
-    assert sender.closed and receiver.closed
+    assert sender.closed
+    assert receiver.closed
 
 
 def test_ack_channel_failure_closes_without_joining_its_own_thread():
@@ -261,10 +276,8 @@ def test_ack_channel_failure_closes_without_joining_its_own_thread():
 
     sender = SharedMemorySender(1, LocalQueue(), BrokenAckQueue())
     try:
-        try:
+        with suppress(BrokenPipeError):
             sender.put(1)
-        except BrokenPipeError:
-            pass
         sender._ack_thread.join(3)
         assert not sender._ack_thread.is_alive()
         assert sender.closed
@@ -274,6 +287,35 @@ def test_ack_channel_failure_closes_without_joining_its_own_thread():
         assert isinstance(caught.value.__cause__, EOFError)
     finally:
         sender.close()
+
+
+def test_unused_sender_can_be_pickled_for_a_child_process():
+    sender = SharedMemorySender(3, "data-queue", "ack-queue")
+    clone = pickle.loads(pickle.dumps(sender))
+    assert clone.capacity == 3
+    assert clone._data_queue == "data-queue"
+    assert clone._ack_queue == "ack-queue"
+    assert clone._process_id is None
+    assert clone._condition is not sender._condition
+    assert isinstance(clone._condition, threading.Condition)
+
+
+def test_initialized_sender_rejects_use_from_another_process(make_pair):
+    sender, receiver = make_pair()
+    sender.put(1)
+    owner = sender._process_id
+    sender._process_id = os.getpid() + 1
+    try:
+        for call in (lambda: sender.put(2), sender.wait_for_all_ack, sender.close):
+            with pytest.raises(RuntimeError, match="another process"):
+                call()
+        with pytest.raises(RuntimeError, match="another process"), sender:
+            pass
+    finally:
+        sender._process_id = owner
+    assert not sender.closed
+    assert receiver.get(timeout=3) == 1
+    assert sender.wait_for_all_ack(timeout=3)
 
 
 def test_initialized_sender_cannot_be_pickled(make_pair):
@@ -304,6 +346,22 @@ def test_ack_initialization_failure_can_be_retried(make_pair, monkeypatch, failu
     sender.put(2)
     assert receiver.get(timeout=3) == 2
     assert sender.wait_for_all_ack(timeout=3)
+
+
+def test_ack_initialization_failure_without_owner_can_be_retried(monkeypatch):
+    sender = SharedMemorySender(1, LocalQueue(), LocalQueue())
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(threading.Thread, "start", Mock(side_effect=RuntimeError("No thread")))
+            with pytest.raises(RuntimeError, match="No thread"):
+                sender.put(1)
+        assert sender._process_id is None
+        assert sender._finalizer is None
+        assert sender.wait_for_all_ack(timeout=0)
+        sender.put(2)
+        assert sender._ack_thread.is_alive()
+    finally:
+        sender.close()
 
 
 def test_receiver_closes_ack_feeder_even_if_data_queue_close_fails(monkeypatch):
@@ -400,10 +458,8 @@ def test_ack_and_cleanup_errors_are_both_reported():
 
     sender = SharedMemorySender(1, LocalQueue(), BrokenAckQueue())
     try:
-        try:
+        with suppress(BrokenPipeError):
             sender.put(1)
-        except BrokenPipeError:
-            pass
         sender._ack_thread.join(3)
         assert not sender._ack_thread.is_alive()
         with pytest.raises(BrokenPipeError) as caught:

@@ -1,5 +1,7 @@
 """The producing endpoint owns each allocation until it is acknowledged."""
 
+from __future__ import annotations
+
 import os
 import threading
 import time
@@ -7,9 +9,13 @@ from multiprocessing.queues import Queue
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.util import Finalize
 from queue import Empty, Full
-from typing import Any, Self
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Self
 
 from .convert import SharedMemoryMessage, release_shared_memory, serialize
+
+if TYPE_CHECKING:
+    from multiprocessing.sharedctypes import Synchronized
 
 
 def _validate_capacity(capacity: int | None) -> None:
@@ -27,11 +33,11 @@ class SharedMemorySender:
     def __init__(
         self,
         capacity: int | None,
-        data_queue: Queue,
-        ack_queue: Queue,
+        data_queue: Queue[SharedMemoryMessage],
+        ack_queue: Queue[str],
         *,
-        producer_owner=None,
-    ):
+        producer_owner: Synchronized[int] | None = None,
+    ) -> None:
         _validate_capacity(capacity)
         self.capacity = capacity
         self._data_queue = data_queue
@@ -44,7 +50,7 @@ class SharedMemorySender:
         self._process_id: int | None = None
         self._ack_thread: threading.Thread | None = None
         self._ack_error: Exception | None = None
-        self._finalizer = None
+        self._finalizer: Finalize[None] | None = None
 
     @property
     def closed(self) -> bool:
@@ -77,7 +83,7 @@ class SharedMemorySender:
     def close(self) -> None:
         """Discard unread messages, stop the ack thread, and close local queues."""
         self._check_process()
-        errors = []
+        errors: list[Exception] = []
         with self._condition:
             if self._closed:
                 return
@@ -112,7 +118,12 @@ class SharedMemorySender:
         self._ensure_open()
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __getstate__(self) -> dict[str, Any]:

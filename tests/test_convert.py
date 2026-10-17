@@ -1,5 +1,7 @@
 import pickle
+import sys
 from multiprocessing.shared_memory import SharedMemory
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -79,7 +81,7 @@ def test_numpy_mutability_is_preserved(readonly):
         release_shared_memory(handle)
     assert result.flags.writeable == original.flags.writeable
     if readonly:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="read-only"):
             result[0] = -1
     else:
         result[0] = -1
@@ -235,14 +237,40 @@ def test_cleanup_tolerates_already_unlinked_blocks():
     assert_unlinked(info.name)
 
 
-def test_unlink_is_attempted_even_if_mapping_close_fails():
-    from unittest.mock import Mock
+def test_cleanup_ignores_names_that_are_already_gone():
+    # Windows never raises here because unlink is a no-op, so simulate POSIX.
+    handle = Mock()
+    handle.unlink.side_effect = FileNotFoundError
+    release_shared_memory(handle)
+    handle.close.assert_called_once()
+    handle.unlink.assert_called_once()
 
+
+def test_unlink_is_attempted_even_if_mapping_close_fails():
     handle = Mock()
     handle.close.side_effect = BufferError("Mapping still exported")
     with pytest.raises(BufferError):
         release_shared_memory(handle)
     handle.unlink.assert_called_once()
+
+
+def test_receiver_attachments_are_not_resource_tracked(monkeypatch):
+    handle, info = serialize(42)
+    attachments = []
+
+    def attach(**kwargs):
+        attachments.append(kwargs)
+        return SharedMemory(**kwargs)
+
+    monkeypatch.setattr(convert, "SharedMemory", attach)
+    try:
+        assert deserialize(info) == 42
+    finally:
+        release_shared_memory(handle)
+    expected = {"name": info.name}
+    if sys.version_info >= (3, 13):
+        expected["track"] = False
+    assert attachments == [expected]
 
 
 def test_in_band_payload_needs_no_intermediate_local_copy(monkeypatch):

@@ -1,8 +1,14 @@
 """Serialize protocol-5 pickle data through a single shared-memory block."""
 
 import pickle
+import sys
+from contextlib import suppress
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
+
+# Receivers never unlink. Tracking their attachments would leak tracker entries and
+# warnings when a receiver does not share the sender's resource tracker.
+_ATTACH_OPTIONS: dict[str, Any] = {"track": False} if sys.version_info >= (3, 13) else {}
 
 
 class SharedMemoryMessage(NamedTuple):
@@ -19,10 +25,8 @@ def release_shared_memory(allocation: SharedMemory) -> None:
     try:
         allocation.close()
     finally:
-        try:
+        with suppress(FileNotFoundError):
             allocation.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def serialize(data: Any) -> tuple[SharedMemory, SharedMemoryMessage]:
@@ -37,10 +41,11 @@ def serialize(data: Any) -> tuple[SharedMemory, SharedMemoryMessage]:
         pickle_data = pickle.dumps(data, protocol=5, buffer_callback=append_buffer)
         buffer_sizes = (len(pickle_data), *(buffer.nbytes for buffer in buffers))
         allocation = SharedMemory(create=True, size=sum(buffer_sizes))
-        allocation.buf[: len(pickle_data)] = pickle_data
+        shared = cast(memoryview, allocation.buf)
+        shared[: len(pickle_data)] = pickle_data
         offset = len(pickle_data)
         for buffer in buffers:
-            allocation.buf[offset : offset + buffer.nbytes] = buffer
+            shared[offset : offset + buffer.nbytes] = buffer
             offset += buffer.nbytes
         return allocation, SharedMemoryMessage(allocation.name, buffer_sizes)
     except BaseException:
@@ -55,16 +60,17 @@ def serialize(data: Any) -> tuple[SharedMemory, SharedMemoryMessage]:
 def deserialize(message: SharedMemoryMessage) -> Any:
     """Unpickle with owned local buffers and always close the shared mapping."""
     _validate_message(message)
-    allocation = SharedMemory(name=message.name)
+    allocation = SharedMemory(name=message.name, **_ATTACH_OPTIONS)
     try:
         if message.size > allocation.size:
             raise ValueError("Shared-memory block is smaller than its metadata")
+        shared = cast(memoryview, allocation.buf)
         pickle_size = message.buffer_sizes[0]
-        buffers = []
+        buffers: list[memoryview] = []
         if len(message.buffer_sizes) > 1:
-            with allocation.buf[pickle_size : message.size] as shared_buffer:
+            with shared[pickle_size : message.size] as shared_buffer:
                 buffers = _copy_buffers(shared_buffer, message.buffer_sizes[1:])
-        with allocation.buf[:pickle_size] as pickle_data:
+        with shared[:pickle_size] as pickle_data:
             return pickle.loads(pickle_data, buffers=buffers)
     finally:
         allocation.close()

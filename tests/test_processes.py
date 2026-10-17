@@ -1,4 +1,7 @@
 import multiprocessing as mp
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -143,7 +146,42 @@ def test_a_second_producing_process_is_rejected(make_pair, ctx):
             process.join(5)
 
 
+FORKED_PRODUCER = """
+import multiprocessing as mp
+
+from memory import create_shared_memory_pair
+from tests.helpers import produce
+
+ctx = mp.get_context("fork")
+sender, receiver = create_shared_memory_pair(2, ctx=ctx)
+process = ctx.Process(target=produce, args=(sender, 20))
+process.start()
+with receiver:
+    for _ in range(20):
+        receiver.get(timeout=10)
+process.join(10)
+sender.close()
+raise SystemExit(process.exitcode)
+"""
+
+
 @pytest.mark.skipif("fork" not in mp.get_all_start_methods(), reason="Requires fork")
+def test_forked_producer_leaves_no_resource_tracker_entries():
+    # A fresh interpreter has no resource tracker running before the fork.
+    result = subprocess.run(
+        [sys.executable, "-c", FORKED_PRODUCER],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "resource_tracker" not in result.stderr
+
+
+@pytest.mark.skipif("fork" not in mp.get_all_start_methods(), reason="Requires fork")
+# The ack thread is running on purpose; Python 3.15 warns about forking with threads.
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
 def test_forked_initialized_sender_cannot_free_parent_memory(make_pair):
     ctx = mp.get_context("fork")
     sender, receiver = make_pair(1, ctx=ctx)
