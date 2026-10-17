@@ -1,6 +1,9 @@
 """The receiving endpoint returns independent local data."""
 
+from __future__ import annotations
+
 from multiprocessing.queues import Queue
+from types import TracebackType
 from typing import Any, Self
 
 from .convert import SharedMemoryMessage, deserialize
@@ -9,7 +12,7 @@ from .convert import SharedMemoryMessage, deserialize
 class SharedMemoryReceiver:
     """Receive objects and acknowledge them even when decoding fails."""
 
-    def __init__(self, data_queue: Queue, ack_queue: Queue):
+    def __init__(self, data_queue: Queue[SharedMemoryMessage], ack_queue: Queue[str]) -> None:
         self._data_queue = data_queue
         self._ack_queue = ack_queue
         self._closed = False
@@ -50,5 +53,10 @@ class SharedMemoryReceiver:
             raise BrokenPipeError("Receiver is closed")
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()

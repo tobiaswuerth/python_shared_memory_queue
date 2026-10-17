@@ -129,10 +129,7 @@ def main(argv=None):
     print(f"{'Bytes':>12}  {'Transport':>9}  {'MiB/s':>10}  {'ms/message':>12}")
     for size in args.sizes:
         count = args.messages or min(1_000, max(1, 2**29 // size))
-        if args.payload == "numpy":
-            payload = np.ones(size // 4, dtype=np.float32)
-        else:
-            payload = b"x" * size
+        payload = np.ones(size // 4, dtype=np.float32) if args.payload == "numpy" else b"x" * size
         for transport in ("standard", "shared"):
             row = {"transport": transport, "size": size, "messages": count}
             durations = []
