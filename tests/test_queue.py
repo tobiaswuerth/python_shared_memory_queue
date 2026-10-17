@@ -11,9 +11,9 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from memory import SharedMemoryReceiver, SharedMemorySender, create_shared_memory_pair
-from memory import sender as sender_module
-from memory.convert import release_shared_memory, serialize
+from py_sharedmemory import SharedMemoryReceiver, SharedMemorySender, create_shared_memory_pair
+from py_sharedmemory import sender as sender_module
+from py_sharedmemory.convert import release_shared_memory, serialize
 
 from .helpers import LocalQueue, assert_unlinked
 
@@ -39,7 +39,7 @@ def test_factory_queue_failure_closes_first_queue():
 
 @pytest.mark.parametrize("endpoint", ["SharedMemorySender", "SharedMemoryReceiver"])
 def test_factory_endpoint_failure_closes_both_queues(monkeypatch, endpoint):
-    from memory import factory
+    from py_sharedmemory import factory
 
     ctx = Mock()
     queues = [Mock(), Mock()]
@@ -53,7 +53,7 @@ def test_factory_endpoint_failure_closes_both_queues(monkeypatch, endpoint):
 
 @pytest.mark.parametrize("share", [False, True])
 def test_factory_starts_a_shared_resource_tracker_only_when_needed(monkeypatch, share):
-    from memory import factory
+    from py_sharedmemory import factory
 
     ensure_running = Mock()
     monkeypatch.setattr(factory, "_SHARE_RESOURCE_TRACKER", share)

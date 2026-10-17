@@ -2,7 +2,7 @@
 
 import multiprocessing as mp
 
-from memory import SharedMemorySender, create_shared_memory_pair
+from py_sharedmemory import SharedMemorySender, create_shared_memory_pair
 
 
 def produce(sender: SharedMemorySender):

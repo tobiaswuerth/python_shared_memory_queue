@@ -17,7 +17,20 @@ _SHARE_RESOURCE_TRACKER = sys.platform != "win32" and sys.version_info < (3, 13)
 def create_shared_memory_pair(
     capacity: int | None = 0, *, ctx: BaseContext | None = None
 ) -> tuple[SharedMemorySender, SharedMemoryReceiver]:
-    """One producer process, multiple consumers. Zero/None capacity is unbounded."""
+    """Create a connected sender and receiver.
+
+    Args:
+        capacity: Maximum messages sent but not yet received and freed; `put` blocks
+            when it is reached. `0` or `None` means unbounded, but on Linux and macOS
+            every unread message also holds two open file descriptors.
+        ctx: Multiprocessing context for the underlying queues, such as
+            `multiprocessing.get_context("spawn")`. Defaults to the default context;
+            use the same context to start the worker processes.
+
+    Returns:
+        `(sender, receiver)`. Pass them to worker processes as `Process` arguments
+        before the first `put`. One process may produce; many may consume.
+    """
     _validate_capacity(capacity)
     context = mp.get_context() if ctx is None else ctx
     if _SHARE_RESOURCE_TRACKER:

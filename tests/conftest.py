@@ -2,7 +2,7 @@ import multiprocessing as mp
 
 import pytest
 
-from memory import create_shared_memory_pair
+from py_sharedmemory import create_shared_memory_pair
 
 
 @pytest.fixture

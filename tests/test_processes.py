@@ -149,7 +149,7 @@ def test_a_second_producing_process_is_rejected(make_pair, ctx):
 FORKED_PRODUCER = """
 import multiprocessing as mp
 
-from memory import create_shared_memory_pair
+from py_sharedmemory import create_shared_memory_pair
 from tests.helpers import produce
 
 ctx = mp.get_context("fork")

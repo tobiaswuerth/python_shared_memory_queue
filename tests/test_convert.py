@@ -6,8 +6,13 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from memory import convert
-from memory.convert import SharedMemoryMessage, deserialize, release_shared_memory, serialize
+from py_sharedmemory import convert
+from py_sharedmemory.convert import (
+    SharedMemoryMessage,
+    deserialize,
+    release_shared_memory,
+    serialize,
+)
 
 from .helpers import assert_unlinked
 
