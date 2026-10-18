@@ -6,6 +6,8 @@ from pathlib import Path
 
 import matplotlib
 
+from .compare import size_label as _size_label
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -59,13 +61,6 @@ def plot(report, output):
         panel.text(0.5, 0.25, "mp.Queue failed", ha="center", color="#b91c1c")
     fig.savefig(output, dpi=200, facecolor="white")
     plt.close(fig)
-
-
-def _size_label(size):
-    for divisor, unit in ((10**9, "GB"), (10**6, "MB"), (10**3, "kB")):
-        if size >= divisor:
-            return f"{size / divisor:g} {unit}"
-    return f"{size} B"
 
 
 def main(argv=None):

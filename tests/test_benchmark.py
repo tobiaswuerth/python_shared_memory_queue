@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import py_sharedmemory
 from benchmarks.benchmark import _expect, _receive, main, measure
 
 
@@ -90,6 +91,34 @@ def test_benchmark_records_failure_and_continues(monkeypatch, tmp_path):
     assert success["durations_seconds"] == [0.01, 0.01]
 
 
+def test_repeats_alternate_the_transport_order(monkeypatch, tmp_path):
+    # Shared runners drift; alternating spreads any slowdown over both transports.
+    calls = []
+
+    def record(transport, payload, count, capacity, ctx):
+        calls.append(transport)
+        return 0.01
+
+    monkeypatch.setattr("benchmarks.benchmark.measure", record)
+    main(["--sizes", "16", "--repeats", "3", "--json", str(tmp_path / "results.json")])
+    assert calls == ["standard", "shared", "shared", "standard", "standard", "shared"]
+
+
+def test_results_report_the_spread_and_the_platform_label(monkeypatch, tmp_path):
+    durations = iter([0.02, 0.02, 0.01, 0.01, 0.04, 0.04])
+    monkeypatch.setattr("benchmarks.benchmark.measure", lambda *args: next(durations), raising=True)
+    path = tmp_path / "results.json"
+    main(["--sizes", "16", "--repeats", "3", "--label", "Linux x64", "--json", str(path)])
+    report = json.loads(path.read_text(encoding="utf-8"))
+    assert report["label"] == "Linux x64"
+    assert report["machine"]
+    assert report["py_sharedmemory"] == py_sharedmemory.__version__
+    for row in report["results"]:
+        assert row["min_mib_per_second"] == pytest.approx(16 * 1_000 / 0.04 / 2**20)
+        assert row["median_mib_per_second"] == pytest.approx(16 * 1_000 / 0.02 / 2**20)
+        assert row["max_mib_per_second"] == pytest.approx(16 * 1_000 / 0.01 / 2**20)
+
+
 @pytest.mark.parametrize(
     "args", [["--messages", "0"], ["--capacity", "-1"], ["--sizes", "3", "--payload", "numpy"]]
 )
@@ -131,3 +160,64 @@ def test_plot_size_labels(size, label):
     from benchmarks.plot import _size_label
 
     assert _size_label(size) == label
+
+
+def _report(path, label, rows):
+    path.write_text(json.dumps({"label": label, "results": rows}), encoding="utf-8")
+    return path
+
+
+def _platform_reports(tmp_path):
+    linux = _report(
+        tmp_path / "linux.json",
+        "Linux x64",
+        [
+            _row("standard", 1_000, throughput=40),
+            _row("shared", 1_000, throughput=10),
+            _row("standard", 10**6, throughput=500),
+            _row("shared", 10**6, throughput=1_000),
+        ],
+    )
+    macos = _report(
+        tmp_path / "macos.json",
+        "macOS arm64",
+        [
+            _row("standard", 1_000, throughput=5),
+            _row("shared", 1_000, status="failed"),
+            _row("standard", 10**6, throughput=200),
+            _row("shared", 10**6, throughput=3_000),
+        ],
+    )
+    return linux, macos
+
+
+def test_compare_prints_a_speedup_table_in_platform_order(tmp_path, capsys):
+    from benchmarks import compare
+
+    compare.main([str(path) for path in _platform_reports(tmp_path)])
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "| Platform | 1 kB | 1 MB |"
+    assert lines[1] == "| --- | ---: | ---: |"
+    assert lines[2] == "| Linux x64 | 0.25× | **2.00×** |"
+    assert lines[3] == "| macOS arm64 | failed | **15.00×** |"
+
+
+def test_compare_draws_the_platform_matrix(tmp_path, capsys):
+    pytest.importorskip("matplotlib")
+    from benchmarks import compare
+
+    image = tmp_path / "platforms.png"
+    reports = [str(path) for path in _platform_reports(tmp_path)]
+    compare.main([*reports, "--image", str(image), "--subtitle", "Test runners"])
+    assert image.read_bytes().startswith(b"\x89PNG")
+    assert "| Platform |" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("background", "ink"),
+    [("#fcfcfb", "#0b0b0b"), ("#f0efec", "#0b0b0b"), ("#104281", "#fcfcfb")],
+)
+def test_matrix_labels_use_the_more_legible_ink(background, ink):
+    from benchmarks.compare import label_ink
+
+    assert label_ink(background) == ink

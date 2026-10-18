@@ -49,6 +49,17 @@ python -m benchmarks.plot results.json chart.png
 `--sizes 16 100 1000 10000 100000 1000000 10000000 100000000 1000000000 10000000000
 --repeats 5`, which needs enough RAM for several copies of a 10 GB payload.
 
+The [benchmark workflow](.github/workflows/benchmark.yml) runs on every release, on demand,
+and on pull requests that change the benchmarks. It measures Linux, Windows, and macOS
+runners, x86-64 and ARM64, from 1 kB to 100 MB. The run summary shows the speedups, and the
+`benchmark-summary` artifact holds the reports and the platform matrix. To redraw it from
+downloaded reports:
+
+```sh
+python -m benchmarks.compare linux-x64.json linux-arm64.json windows-x64.json \
+    windows-arm64.json macos-arm64.json --image platforms.png
+```
+
 ## Releasing
 
 1. Update `__version__` in `py_sharedmemory/__init__.py` and add the changelog entry.
