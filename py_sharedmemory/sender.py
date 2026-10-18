@@ -1,7 +1,8 @@
-"""The producing endpoint owns each allocation until it is acknowledged."""
+"""The producing endpoint owns each block until it is acknowledged, then reuses it."""
 
 from __future__ import annotations
 
+import mmap
 import os
 import sys
 import threading
@@ -15,14 +16,28 @@ from queue import Empty, Full
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
-from .convert import SharedMemoryMessage, release_shared_memory, serialize
+from .convert import SharedMemoryMessage, create_shared_memory, release_shared_memory, serialize
 
 if TYPE_CHECKING:
     from multiprocessing.sharedctypes import Synchronized
 
-# A POSIX block lives on by name until it is unlinked, so the sender can drop its mapping
-# and file descriptors right after writing. Windows frees a block with its last handle.
-_UNMAP_AFTER_WRITE = sys.platform != "win32"
+# A POSIX block lives on by name until it is unlinked, so the sender can unmap the blocks it
+# cannot keep mapped and close their file descriptors. Windows frees a block with its last
+# handle, so it keeps every unread block mapped.
+_UNMAP_EXCESS_BLOCKS = sys.platform != "win32"
+
+# Each mapped POSIX block holds two file descriptors. Unread blocks beyond this many are
+# unmapped right after writing, and freed rather than reused once acknowledged.
+_MAX_MAPPED_BLOCKS = 8
+
+# Writing to pages that are already mapped costs a fraction of faulting in fresh ones, so
+# acknowledged blocks are reused. A message that no pooled block fits frees one, so blocks
+# never outnumber the capacity; these limits also bound the memory kept while idle.
+_MAX_POOLED_BLOCKS = 8
+_MAX_POOLED_BYTES = 256 * 2**20
+
+# A pooled block serves a message that fills at least half of it, or any that fits a small one.
+_SMALL_BLOCK_BYTES = 2**20
 
 # The metadata queue holds at most SEM_VALUE_MAX unread items (32,767 on macOS); beyond
 # that its put would raise queue.Full even for a blocking put on an unbounded sender.
@@ -38,22 +53,26 @@ def _validate_capacity(capacity: int | None) -> None:
         raise ValueError("capacity must not be negative")
 
 
+def _fits(allocation: SharedMemory, size: int) -> bool:
+    return size <= allocation.size <= max(2 * size, _SMALL_BLOCK_BYTES)
+
+
 class SharedMemorySender:
     """Producing endpoint of a pair; create it with `create_shared_memory_pair`.
 
-    Each `put` copies one object into a new shared-memory block that this sender owns
-    until a receiver acknowledges it. The sender is thread-safe, but only one process
-    may produce: pass it to that process as a `Process` argument before the first
-    `put`. Call `wait_for_all_ack` before closing, because closing frees unread blocks.
-    Leaving a `with` block or exiting the process normally while messages are still
-    unacknowledged emits a `RuntimeWarning`.
+    Each `put` copies one object into a shared-memory block that this sender owns until a
+    receiver acknowledges it; acknowledged blocks are reused for later messages. The
+    sender is thread-safe, but only one process may produce: pass it to that process as a
+    `Process` argument before the first `put`. Call `wait_for_all_ack` before closing,
+    because closing frees unread blocks. Leaving a `with` block or exiting the process
+    normally while messages are still unacknowledged emits a `RuntimeWarning`.
     """
 
     def __init__(
         self,
         capacity: int | None,
         data_queue: Queue[SharedMemoryMessage],
-        ack_queue: Queue[str],
+        ack_queue: Queue[int],
         *,
         producer_owner: Synchronized[int] | None = None,
     ) -> None:
@@ -62,7 +81,12 @@ class SharedMemorySender:
         self._data_queue = data_queue
         self._ack_queue = ack_queue
         self._closed = False
-        self._blocks: dict[str, SharedMemory] = {}
+        # Unacknowledged blocks by message sequence number, oldest first.
+        self._blocks: dict[int, SharedMemory] = {}
+        # Acknowledged, still-mapped blocks kept for reuse, oldest first.
+        self._pool: list[SharedMemory] = []
+        self._mapped_in_flight = 0
+        self._sequence = 0
         self._pending_count = 0
         self._condition = threading.Condition()
         self._producer_owner = producer_owner
@@ -92,9 +116,9 @@ class SharedMemorySender:
 
         Serialization errors propagate unchanged, and the sender stays usable.
         """
-        self._reserve_slot(block, timeout)
+        sequence = self._reserve_slot(block, timeout)
         try:
-            allocation, message = serialize(data)
+            allocation, message = serialize(data, sequence, self._allocate)
         except BaseException:
             self._release_slot()
             raise
@@ -105,7 +129,7 @@ class SharedMemorySender:
         self.put(data, block=False)
 
     def wait_for_all_ack(self, timeout: float | None = None) -> bool:
-        """Wait until every sent message has been received and its memory freed.
+        """Wait until every sent message has been received and its block released.
 
         Returns:
             `True` once nothing is outstanding, `False` if `timeout` seconds pass first.
@@ -123,7 +147,7 @@ class SharedMemorySender:
             return drained
 
     def close(self) -> None:
-        """Free unread messages, stop the acknowledgement thread, and close the queues.
+        """Free unread messages and reusable blocks, stop acknowledgements, close the queues.
 
         Idempotent. Unread messages are discarded silently, so drain with
         `wait_for_all_ack` first. Also runs automatically when the producing process
@@ -136,9 +160,14 @@ class SharedMemorySender:
                 return
             self._closed = True
             discarding_messages = self._pending_count > 0
-            for name in list(self._blocks):
+            for sequence in list(self._blocks):
                 try:
-                    self._release_message(name)
+                    self._discard(sequence)
+                except Exception as error:
+                    errors.append(error)
+            while self._pool:
+                try:
+                    release_shared_memory(self._pool.pop())
                 except Exception as error:
                     errors.append(error)
             self._condition.notify_all()
@@ -217,7 +246,7 @@ class SharedMemorySender:
         if self._closed:
             raise BrokenPipeError("Sender is closed") from self._ack_error
 
-    def _reserve_slot(self, block: bool, timeout: float | None) -> None:
+    def _reserve_slot(self, block: bool, timeout: float | None) -> int:
         self._check_process()
         deadline = None
         if block and timeout is not None:
@@ -235,22 +264,40 @@ class SharedMemorySender:
                 self._condition.wait(remaining)
                 self._ensure_open()
             self._pending_count += 1
+            self._sequence += 1
+            return self._sequence
+
+    def _allocate(self, size: int) -> SharedMemory:
+        with self._condition:
+            fitting = [allocation for allocation in self._pool if _fits(allocation, size)]
+            if fitting:
+                allocation = min(fitting, key=lambda candidate: candidate.size)
+                self._pool.remove(allocation)
+                return allocation
+            if self._pool:
+                # The pool no longer matches the messages being sent. Freeing a block for
+                # the new one keeps the number of blocks within the capacity.
+                release_shared_memory(self._pool.pop(0))
+        # Whole pages cost no extra memory and let slightly larger messages reuse the block.
+        return create_shared_memory(-(-size // mmap.PAGESIZE) * mmap.PAGESIZE)
 
     def _publish(self, allocation: SharedMemory, message: SharedMemoryMessage) -> None:
         with self._condition:
             try:
+                if _UNMAP_EXCESS_BLOCKS and self._mapped_in_flight >= _MAX_MAPPED_BLOCKS:
+                    allocation.close()
                 # Transfer ownership before metadata can reach the receiver.
-                self._blocks[allocation.name] = allocation
+                self._blocks[message.sequence] = allocation
             except BaseException:
                 self._release_allocation(allocation)
                 raise
+            if allocation.buf is not None:
+                self._mapped_in_flight += 1
             try:
                 self._ensure_open()
-                if _UNMAP_AFTER_WRITE:
-                    allocation.close()
                 self._data_queue.put_nowait(message)
             except BaseException:
-                self._release_message(allocation.name)
+                self._discard(message.sequence)
                 raise
 
     def _release_slot(self) -> None:
@@ -265,11 +312,39 @@ class SharedMemorySender:
             # Capacity becomes available only after memory is freed.
             self._release_slot()
 
-    def _release_message(self, name: str) -> None:
+    def _discard(self, sequence: int) -> None:
         with self._condition:
-            allocation = self._blocks.pop(name, None)
-            if allocation is not None:
-                self._release_allocation(allocation)
+            allocation = self._blocks.pop(sequence)
+            if allocation.buf is not None:
+                self._mapped_in_flight -= 1
+            self._release_allocation(allocation)
+
+    def _acknowledge(self, sequence: int) -> None:
+        with self._condition:
+            # Unknown and repeated acknowledgements never release a newer message's block.
+            allocation = self._blocks.pop(sequence, None)
+            if allocation is None:
+                return
+            try:
+                if allocation.buf is None:
+                    release_shared_memory(allocation)
+                else:
+                    self._mapped_in_flight -= 1
+                    self._recycle(allocation)
+            finally:
+                # Capacity becomes available only once the block is freed or reusable.
+                self._release_slot()
+
+    def _recycle(self, allocation: SharedMemory) -> None:
+        if allocation.size > _MAX_POOLED_BYTES:
+            release_shared_memory(allocation)
+            return
+        self._pool.append(allocation)
+        # Free the oldest blocks first; the newest best match the messages being sent.
+        while len(self._pool) > _MAX_POOLED_BLOCKS or (
+            sum(pooled.size for pooled in self._pool) > _MAX_POOLED_BYTES
+        ):
+            release_shared_memory(self._pool.pop(0))
 
     def _start_ack_thread(self) -> None:
         if self._process_id is not None:
@@ -301,7 +376,7 @@ class SharedMemorySender:
     def _process_acknowledgements(self) -> None:
         while not self._closed:
             try:
-                self._release_message(self._ack_queue.get(timeout=0.05))
+                self._acknowledge(self._ack_queue.get(timeout=0.05))
             except Empty:
                 continue
             except Exception as error:

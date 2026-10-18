@@ -1,7 +1,7 @@
+import errno
 import multiprocessing as mp
 import os
 import pickle
-import sys
 import threading
 import time
 import warnings
@@ -18,7 +18,7 @@ from py_sharedmemory import SharedMemoryReceiver, SharedMemorySender, create_sha
 from py_sharedmemory import sender as sender_module
 from py_sharedmemory.convert import release_shared_memory, serialize
 
-from .helpers import LocalQueue, assert_unlinked
+from .helpers import LocalQueue, assert_unlinked, block_names, pooled_names
 
 
 @pytest.mark.parametrize("capacity", [-10, -1, 1.5, "1", True, False])
@@ -114,19 +114,6 @@ def test_outstanding_messages_never_exceed_the_metadata_queue_limit(
     assert sender.wait_for_all_ack(timeout=3)
 
 
-@pytest.mark.parametrize("unmap", [False, True])
-def test_sender_unmaps_blocks_only_where_names_keep_them_alive(make_pair, monkeypatch, unmap):
-    monkeypatch.setattr(sender_module, "_UNMAP_AFTER_WRITE", unmap)
-    sender, receiver = make_pair()
-    sender.put(42)
-    allocation = next(iter(sender._blocks.values()))
-    assert (allocation.buf is None) is unmap
-    if not (unmap and sys.platform == "win32"):
-        # Windows frees an unmapped block at once, which is why it never unmaps.
-        assert receiver.get(timeout=3) == 42
-        assert sender.wait_for_all_ack(timeout=3)
-
-
 def test_put_timeout_waits_for_capacity(make_pair):
     sender, _ = make_pair()
     sender.put(1)
@@ -158,7 +145,7 @@ def test_immediate_ack_cannot_arrive_before_handle_registration():
     class ImmediateAckQueue(LocalQueue):
         def put_nowait(self, info):
             acknowledged.append(info.name)
-            sender._release_message(info.name)
+            sender._acknowledge(info.sequence)
 
     sender = SharedMemorySender(1, ImmediateAckQueue(), LocalQueue())
     try:
@@ -166,19 +153,21 @@ def test_immediate_ack_cannot_arrive_before_handle_registration():
             sender.put(index, timeout=0.1)
             assert sender.wait_for_all_ack(timeout=0.1)
             assert not sender._blocks
-        for name in acknowledged:
-            assert_unlinked(name)
     finally:
         sender.close()
+    assert len(acknowledged) == 25
+    for name in acknowledged:
+        assert_unlinked(name)
 
 
 def test_unknown_and_duplicate_acks_do_not_release_extra_capacity(make_pair):
     sender, receiver = make_pair()
     sender.put(1)
-    name = next(iter(sender._blocks))
+    sequence = next(iter(sender._blocks))
     assert receiver.get(timeout=3) == 1
     assert sender.wait_for_all_ack(timeout=3)
-    sender._ack_queue.put_nowait(name)
+    sender._ack_queue.put_nowait(sequence)
+    sender._ack_queue.put_nowait(10**9)
     sender._ack_queue.put_nowait("unknown-shared-memory")
     sender.put(2)
     with pytest.raises(Full):
@@ -187,14 +176,20 @@ def test_unknown_and_duplicate_acks_do_not_release_extra_capacity(make_pair):
     assert sender.wait_for_all_ack(timeout=3)
 
 
+@pytest.mark.parametrize("warm", [False, True], ids=["new-block", "reused-block"])
 @pytest.mark.parametrize("failure", ["pickle", "allocation", "register", "publish", "interrupt"])
-def test_failed_put_frees_memory_and_sender_remains_usable(make_pair, monkeypatch, failure):
+def test_failed_put_frees_memory_and_sender_remains_usable(make_pair, monkeypatch, failure, warm):
     sender, receiver = make_pair()
+    if warm:
+        sender.put("warm-up")
+        assert receiver.get(timeout=3) == "warm-up"
+        assert sender.wait_for_all_ack(timeout=3)
+        assert sender._pool
     names = []
     real_convert = sender_module.serialize
 
-    def track(data):
-        handle, info = real_convert(data)
+    def track(*args, **kwargs):
+        handle, info = real_convert(*args, **kwargs)
         names.append(handle.name)
         return handle, info
 
@@ -227,6 +222,8 @@ def test_failed_put_frees_memory_and_sender_remains_usable(make_pair, monkeypatc
             sender.put(data, timeout=0.2)
     for name in names:
         assert_unlinked(name)
+    if warm and failure in ("pickle", "allocation", "interrupt"):
+        assert sender._pool  # Failing before allocation leaves the pooled block alone
     assert not sender.closed
     assert sender.wait_for_all_ack(timeout=0)
     sender.put("recovered", timeout=0.2)
@@ -237,15 +234,16 @@ def test_failed_put_frees_memory_and_sender_remains_usable(make_pair, monkeypatc
 def test_failed_decode_is_acknowledged_and_next_message_succeeds(make_pair):
     sender, receiver = make_pair()
     sender.put(42)
-    name = next(iter(sender._blocks))
+    (name,) = block_names(sender)
     corrupt = SharedMemory(name=name)
     corrupt.buf[0] = ord("!")
     corrupt.close()
     with pytest.raises(pickle.UnpicklingError):
         receiver.get(timeout=3)
     assert sender.wait_for_all_ack(timeout=3)
-    assert_unlinked(name)
+    assert pooled_names(sender) == [name]
     sender.put(43, timeout=0.2)
+    assert block_names(sender) == [name]  # The next message overwrites the corrupt block
     assert receiver.get(timeout=3) == 43
 
 
@@ -261,12 +259,12 @@ def test_array_snapshot_is_independent_and_survives_close(make_pair):
     source = np.arange(262_144, dtype=np.float32)
     expected = source.copy()
     sender.put(source)
-    name = next(iter(sender._blocks))
+    (name,) = block_names(sender)
     source[:] = -1
     result = receiver.get(timeout=3)
     assert sender.wait_for_all_ack(timeout=3)
-    assert_unlinked(name)
     sender.close()
+    assert_unlinked(name)
     np.testing.assert_array_equal(result, expected)
     result[:] = 7
     assert np.all(source == -1)
@@ -276,7 +274,7 @@ def test_close_is_idempotent_and_releases_unread_blocks(make_pair):
     sender, receiver = make_pair(0)
     for index in range(10):
         sender.put(index)
-    names = list(sender._blocks)
+    names = block_names(sender)
     sender.close()
     sender.close()
     assert sender._finalizer is not None
@@ -313,7 +311,7 @@ def send_then_leave(sender, count, *, fail=False):
             sender.put(index)
         if fail:
             raise ValueError("producer failed")
-        return list(sender._blocks)
+        return block_names(sender)
 
 
 @pytest.mark.parametrize(
@@ -360,7 +358,7 @@ def test_process_exit_cleanup_warns_about_discarded_messages(make_pair):
 def test_warning_as_error_still_closes_the_sender(make_pair):
     sender, _ = make_pair()
     sender.put(1)
-    name = next(iter(sender._blocks))
+    (name,) = block_names(sender)
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         with pytest.raises(RuntimeWarning, match="unacknowledged"), sender:
@@ -472,7 +470,7 @@ def test_receiver_closes_ack_feeder_even_if_data_queue_close_fails(monkeypatch):
     try:
         data_queue.put_nowait(message)
         assert receiver.get() == 42
-        assert ack_queue.get(timeout=3) == message.name
+        assert ack_queue.get(timeout=3) == message.sequence
         monkeypatch.setattr(
             data_queue, "close", Mock(side_effect=OSError("Data queue close failed"))
         )
@@ -488,11 +486,87 @@ def test_receiver_closes_ack_feeder_even_if_data_queue_close_fails(monkeypatch):
         ack_queue.join_thread()
 
 
+def fail_to_open(path):
+    raise FileNotFoundError(errno.ENOENT, "Missing input file", path)
+
+
+class OpensFileOnLoad:
+    def __reduce__(self):
+        return fail_to_open, ("missing.txt",)
+
+
+def test_freed_block_is_not_acknowledged():
+    # The sender already freed the block; nothing is left for it to release.
+    allocation, message = serialize(42)
+    release_shared_memory(allocation)
+    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
+    data_queue.put_nowait(message)
+    with pytest.raises(FileNotFoundError, match="freed before it was received"):
+        receiver.get_nowait()
+    assert ack_queue.empty()
+
+
+def test_block_recreated_empty_while_attaching_is_not_acknowledged():
+    # On Windows, attaching to a name freed mid-attach creates a new zero-filled block.
+    allocation, message = serialize(42)
+    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
+    try:
+        allocation.buf[0] = 0
+        data_queue.put_nowait(message)
+        with pytest.raises(FileNotFoundError, match="freed before it was received"):
+            receiver.get_nowait()
+        assert ack_queue.empty()
+    finally:
+        release_shared_memory(allocation)
+
+
+def test_file_not_found_while_unpickling_is_still_acknowledged():
+    allocation, message = serialize(OpensFileOnLoad())
+    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
+    try:
+        data_queue.put_nowait(message)
+        with pytest.raises(FileNotFoundError, match="Missing input file"):
+            receiver.get_nowait()
+        assert ack_queue.get_nowait() == message.sequence
+    finally:
+        release_shared_memory(allocation)
+
+
+def test_many_freed_messages_do_not_block_receiver_close():
+    # Regression: acknowledging freed blocks filled the acknowledgement pipe, which the closed
+    # sender no longer read, so close() waited forever for the queue feeder to flush it.
+    allocation, message = serialize(42)
+    release_shared_memory(allocation)
+    data_queue = LocalQueue()
+    ack_queue = mp.get_context("spawn").Queue()
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
+    try:
+        for _ in range(5_000):
+            data_queue.put_nowait(message)
+            with pytest.raises(FileNotFoundError):
+                receiver.get_nowait()
+        closer = threading.Thread(target=receiver.close, daemon=True)
+        closer.start()
+        closer.join(10)
+        assert not closer.is_alive(), "Receiver close blocked on unread acknowledgements"
+    finally:
+        # Drain the pipe so a failure cannot leave a blocked feeder thread behind. The feeder
+        # closes the reader once it has flushed everything.
+        with suppress(OSError):
+            while ack_queue._reader.poll(0.1):
+                ack_queue._reader.recv_bytes()
+        ack_queue.close()
+        ack_queue.join_thread()
+
+
 def test_cleanup_error_does_not_leave_other_allocations_or_queues_open(make_pair, monkeypatch):
     sender, receiver = make_pair(0)
     for index in range(3):
         sender.put(index)
-    names = list(sender._blocks)
+    names = block_names(sender)
     real_close = sender_module.release_shared_memory
 
     def fail_one_close(handle):
@@ -512,9 +586,10 @@ def test_cleanup_error_does_not_leave_other_allocations_or_queues_open(make_pair
 
 
 def test_drain_waits_until_shared_memory_cleanup_finishes(make_pair, monkeypatch):
+    monkeypatch.setattr(sender_module, "_MAX_POOLED_BLOCKS", 0)  # Free on acknowledgement
     sender, receiver = make_pair()
     sender.put(1)
-    name = next(iter(sender._blocks))
+    (name,) = block_names(sender)
     cleanup_started = threading.Event()
     allow_cleanup = threading.Event()
     wait_started = threading.Event()

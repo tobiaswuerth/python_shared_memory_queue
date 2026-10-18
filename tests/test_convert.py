@@ -110,6 +110,37 @@ def test_multiple_buffers_and_repeated_references():
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_out_of_band_arrays_are_aligned_after_odd_sized_ones():
+    original = [
+        np.ones(33, dtype=np.uint8),
+        np.ones(7, dtype=np.float64),
+        np.ones(3, dtype=np.complex128),
+        np.ones(5, dtype=np.int16),
+        np.ones(9, dtype=np.float32),
+        np.ones(3, dtype=np.longdouble),
+    ]
+    handle, info = serialize(original)
+    try:
+        result = deserialize(info)
+    finally:
+        release_shared_memory(handle)
+    for actual, expected in zip(result, original, strict=True):
+        np.testing.assert_array_equal(actual, expected)
+        assert actual.flags.aligned, actual.dtype
+
+
+def test_each_out_of_band_buffer_owns_its_memory():
+    # Keeping a small buffer must not keep its large neighbour alive.
+    small, large = bytearray(b"label"), bytearray(2**20)
+    handle, info = serialize((Buffered(small), Buffered(large)))
+    try:
+        result = deserialize(info)
+    finally:
+        release_shared_memory(handle)
+    assert len(result[0].obj) == len(small)
+    assert len(result[1].obj) == len(large)
+
+
 @pytest.mark.parametrize("payload", [b"readonly", bytearray(b"writable"), bytearray()])
 def test_protocol_5_buffer_mutability_and_empty_buffers(payload):
     handle, info = serialize(Buffered(payload))
@@ -188,6 +219,10 @@ def test_copy_failure_unlinks_new_allocation(monkeypatch):
         SharedMemoryMessage("unused", (True,)),
         SharedMemoryMessage("unused", (1.0,)),
         SharedMemoryMessage("unused", [1]),
+        SharedMemoryMessage("unused", (1,), -1),
+        SharedMemoryMessage("unused", (1,), True),
+        SharedMemoryMessage("unused", (1,), 1.0),
+        SharedMemoryMessage("unused", (1,), None),
     ],
 )
 def test_invalid_metadata_is_rejected_before_attaching(bad_info, monkeypatch):
@@ -249,6 +284,27 @@ def test_freed_block_reports_a_clear_error():
         deserialize(info)
     assert caught.value.filename == info.name
     assert isinstance(caught.value.__cause__, FileNotFoundError)
+
+
+def test_zero_filled_block_counts_as_freed(monkeypatch):
+    # Windows recreates a name freed mid-attach as an empty block; a pickle never starts at 0.
+    handle, info = serialize(42)
+    attached = []
+
+    def attach(**kwargs):
+        mapping = SharedMemory(**kwargs)
+        attached.append(mapping)
+        return mapping
+
+    monkeypatch.setattr(convert, "SharedMemory", attach)
+    try:
+        handle.buf[0] = 0
+        with pytest.raises(FileNotFoundError, match="freed before it was received") as caught:
+            deserialize(info)
+        assert caught.value.filename == info.name
+        assert attached[0].buf is None
+    finally:
+        release_shared_memory(handle)
 
 
 def test_cleanup_ignores_names_that_are_already_gone():

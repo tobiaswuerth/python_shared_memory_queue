@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.2.0
+
+- Reuse received shared-memory blocks instead of freeing them. Writing into fresh pages
+  cost far more than the copy itself, so large `put` calls are now much faster. A block
+  is reused for a message that fills at least half of it, or for any message that fits a
+  block of up to 1 MiB. The sender keeps at most 8 blocks and 256 MiB for reuse, never
+  more blocks than the capacity allows, and frees them on `close()`, so peak memory is
+  unchanged. On Linux and macOS at most 8 unread blocks stay mapped (two file
+  descriptors each).
+- Acknowledgements carry a per-message sequence number, so an unknown or repeated
+  acknowledgement can never release a reused block that holds a newer message.
+- Fix receivers hanging forever in `close()` or at process exit after reading many
+  messages that a closed sender had already freed: such messages are no longer
+  acknowledged, so the acknowledgement pipe can no longer fill up.
+- Fix a Windows race where a message freed while a receiver attached to it raised a
+  confusing `UnpicklingError`; it now raises the usual "freed before it was received"
+  `FileNotFoundError`.
+- Received NumPy arrays are always aligned. Arrays that followed an odd-sized buffer in the
+  same message used to arrive unaligned, which slows NumPy and breaks libraries that need
+  aligned memory. Each array now owns its memory, so keeping one no longer keeps the
+  whole message alive.
+
 ## 4.1.1
 
 - Unread messages no longer hold file descriptors on Linux and macOS: the sender unmaps
