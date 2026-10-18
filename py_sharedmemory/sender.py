@@ -104,8 +104,9 @@ class SharedMemorySender:
         """Send a picklable object through shared memory.
 
         Args:
-            data: Any object that pickle protocol 5 can serialize. NumPy arrays and
-                other buffers are copied out-of-band without an extra pickle copy.
+            data: Any object that pickle protocol 5 can serialize. NumPy arrays, other
+                buffers, and large bytes-like objects are copied without an extra
+                pickle copy.
             block: Wait for capacity when `capacity` messages are outstanding.
             timeout: Maximum seconds to wait for capacity; `None` waits forever.
 

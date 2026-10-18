@@ -37,6 +37,16 @@ def release_shared_memory(allocation: SharedMemory) -> None:
             allocation.unlink()
 
 
+class _PickleChunks(list[memoryview]):
+    """Pickle output kept as views of what pickle wrote rather than one joined copy."""
+
+    def write(self, data: Any) -> None:
+        # Pickle passes bytes and bytearrays of 64 KiB or more as the objects themselves.
+        # A view also stops a bytearray from being resized before it is copied, which would
+        # leave its length header in the stream wrong.
+        self.append(memoryview(data))
+
+
 def serialize(
     data: Any,
     sequence: int = 0,
@@ -44,8 +54,11 @@ def serialize(
 ) -> tuple[SharedMemory, SharedMemoryMessage]:
     """Copy a pickle and its out-of-band buffers into an owned block of at least that size.
 
-    `allocate` returns a new or reused block; this function frees it if copying fails.
+    Large bytes, bytearrays, and contiguous arrays are copied once, straight from the
+    original objects into shared memory. `allocate` returns a new or reused block; this
+    function frees it if copying fails.
     """
+    chunks = _PickleChunks()
     buffers: list[memoryview] = []
     allocation = None
 
@@ -53,23 +66,23 @@ def serialize(
         buffers.append(buffer.raw())
 
     try:
-        pickle_data = pickle.dumps(data, protocol=5, buffer_callback=append_buffer)
-        buffer_sizes = (len(pickle_data), *(buffer.nbytes for buffer in buffers))
+        pickle.Pickler(chunks, protocol=5, buffer_callback=append_buffer).dump(data)
+        pickle_size = sum(chunk.nbytes for chunk in chunks)
+        buffer_sizes = (pickle_size, *(buffer.nbytes for buffer in buffers))
         allocation = allocate(sum(buffer_sizes))
         shared = cast(memoryview, allocation.buf)
-        shared[: len(pickle_data)] = pickle_data
-        offset = len(pickle_data)
-        for buffer in buffers:
-            shared[offset : offset + buffer.nbytes] = buffer
-            offset += buffer.nbytes
+        offset = 0
+        for view in (*chunks, *buffers):
+            shared[offset : offset + view.nbytes] = view
+            offset += view.nbytes
         return allocation, SharedMemoryMessage(allocation.name, buffer_sizes, sequence)
     except BaseException:
         if allocation is not None:
             release_shared_memory(allocation)
         raise
     finally:
-        for buffer in buffers:
-            buffer.release()
+        for view in (*chunks, *buffers):
+            view.release()
 
 
 def deserialize(message: SharedMemoryMessage) -> Any:

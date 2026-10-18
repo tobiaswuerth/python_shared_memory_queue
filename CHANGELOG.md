@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.2.1
+
+- `put` copies large `bytes` and `bytearray` objects (64 KiB and up) straight into shared
+  memory, wherever they appear in a message. It used to build the complete pickle in
+  memory first: an extra copy of the payload that briefly needed up to 1.5 times its size
+  (48 MiB for a 32 MiB `bytearray`). Strided NumPy arrays, which NumPy pickles as `bytes`,
+  skip that copy too. The message format is unchanged.
+- Resizing a `bytearray` while its message is being pickled, from a `__reduce__` method,
+  now raises `BufferError` instead of risking a corrupted message.
+
 ## 4.2.0
 
 - Reuse received shared-memory blocks instead of freeing them. Writing into fresh pages
