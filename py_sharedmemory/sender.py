@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Self
 from .convert import SharedMemoryMessage, create_shared_memory, release_shared_memory, serialize
 
 if TYPE_CHECKING:
-    from multiprocessing.sharedctypes import Synchronized
+    from multiprocessing.synchronize import Lock
 
 # A POSIX block lives on by name until it is unlinked, so the sender can unmap the blocks it
 # cannot keep mapped and close their file descriptors. Windows frees a block with its last
@@ -74,7 +74,7 @@ class SharedMemorySender:
         data_queue: Queue[SharedMemoryMessage],
         ack_queue: Queue[int],
         *,
-        producer_owner: Synchronized[int] | None = None,
+        owner_lock: Lock | None = None,
     ) -> None:
         _validate_capacity(capacity)
         self.capacity = capacity
@@ -89,7 +89,9 @@ class SharedMemorySender:
         self._sequence = 0
         self._pending_count = 0
         self._condition = threading.Condition()
-        self._producer_owner = producer_owner
+        # The producing process takes this pair-wide lock on its first put and never
+        # releases it, so any other process trying to produce is refused.
+        self._owner_lock = owner_lock
         self._process_id: int | None = None
         self._ack_thread: threading.Thread | None = None
         self._ack_error: Exception | None = None
@@ -350,13 +352,9 @@ class SharedMemorySender:
     def _start_ack_thread(self) -> None:
         if self._process_id is not None:
             return
-        process_id = os.getpid()
-        if self._producer_owner is not None:
-            with self._producer_owner.get_lock():
-                if self._producer_owner.value not in (0, process_id):
-                    raise RuntimeError("A shared-memory pair supports one producing process")
-                self._producer_owner.value = process_id
-        self._process_id = process_id
+        if self._owner_lock is not None and not self._owner_lock.acquire(block=False):
+            raise RuntimeError("A shared-memory pair supports one producing process")
+        self._process_id = os.getpid()
         try:
             self._ack_thread = threading.Thread(
                 target=self._process_acknowledgements, name="shared-memory-acks", daemon=True
@@ -369,9 +367,8 @@ class SharedMemorySender:
             self._finalizer = None
             self._ack_thread = None
             self._process_id = None
-            if self._producer_owner is not None:
-                with self._producer_owner.get_lock():
-                    self._producer_owner.value = 0
+            if self._owner_lock is not None:
+                self._owner_lock.release()
             raise
 
     def _process_acknowledgements(self) -> None:

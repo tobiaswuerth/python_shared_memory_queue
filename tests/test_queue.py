@@ -27,7 +27,7 @@ def test_invalid_capacity_fails_before_resources_are_created(capacity):
     error = ValueError if type(capacity) is int else TypeError
     with pytest.raises(error, match="capacity"):
         create_shared_memory_pair(capacity, ctx=ctx)
-    ctx.Value.assert_not_called()
+    ctx.Lock.assert_not_called()
     ctx.Queue.assert_not_called()
 
 
@@ -416,6 +416,22 @@ def test_initialized_sender_rejects_use_from_another_process(make_pair):
     assert sender.wait_for_all_ack(timeout=3)
 
 
+def test_owner_lock_refuses_a_second_producer():
+    # Two senders sharing one pair's owner lock behave like copies in two processes.
+    owner_lock = mp.get_context("spawn").Lock()
+    first = SharedMemorySender(1, LocalQueue(), LocalQueue(), owner_lock=owner_lock)
+    second = SharedMemorySender(1, LocalQueue(), LocalQueue(), owner_lock=owner_lock)
+    try:
+        first.put("first")
+        with pytest.raises(RuntimeError, match="one producing process"):
+            second.put("second")
+        assert second._process_id is None
+        assert not second.closed
+    finally:
+        first.close()
+        second.close()
+
+
 def test_initialized_sender_cannot_be_pickled(make_pair):
     sender, receiver = make_pair()
     sender.put(1)
@@ -438,7 +454,8 @@ def test_ack_initialization_failure_can_be_retried(make_pair, monkeypatch, failu
         with pytest.raises(RuntimeError, match="Initialization failed"):
             sender.put(1)
     assert sender._process_id is None
-    assert sender._producer_owner.value == 0
+    assert sender._owner_lock.acquire(block=False)  # Released for the retry
+    sender._owner_lock.release()
     assert sender._ack_thread is None
     assert sender._finalizer is None
     sender.put(2)
@@ -462,14 +479,23 @@ def test_ack_initialization_failure_without_owner_can_be_retried(monkeypatch):
         sender.close()
 
 
+def metadata_queue():
+    """A real metadata queue: receivers read it through multiprocessing's queue internals."""
+    return mp.get_context("spawn").Queue()
+
+
+def close_queue(queue):
+    type(queue).close(queue)  # Bypasses a patched close
+    queue.join_thread()
+
+
 def test_receiver_closes_ack_feeder_even_if_data_queue_close_fails(monkeypatch):
     allocation, message = serialize(42)
-    data_queue = LocalQueue()
-    ack_queue = mp.get_context("spawn").Queue()
+    data_queue, ack_queue = metadata_queue(), metadata_queue()
     receiver = SharedMemoryReceiver(data_queue, ack_queue)
     try:
         data_queue.put_nowait(message)
-        assert receiver.get() == 42
+        assert receiver.get(timeout=3) == 42
         assert ack_queue.get(timeout=3) == message.sequence
         monkeypatch.setattr(
             data_queue, "close", Mock(side_effect=OSError("Data queue close failed"))
@@ -482,8 +508,62 @@ def test_receiver_closes_ack_feeder_even_if_data_queue_close_fails(monkeypatch):
         receiver.close()
     finally:
         release_shared_memory(allocation)
-        ack_queue.close()
-        ack_queue.join_thread()
+        close_queue(data_queue)
+        close_queue(ack_queue)
+
+
+def test_get_times_out_while_another_reader_holds_the_read_lock(make_pair):
+    # A consumer killed in the middle of reading leaves the lock taken; get must still time out.
+    sender, receiver = make_pair()
+    sender.put(1)
+    data_queue = receiver._data_queue
+    assert data_queue._reader.poll(3)
+    assert data_queue._rlock.acquire(timeout=3)
+    try:
+        started = time.monotonic()
+        with pytest.raises(Empty):
+            receiver.get(timeout=0.1)
+        assert time.monotonic() - started < 2
+        with pytest.raises(Empty):
+            receiver.get_nowait()
+    finally:
+        data_queue._rlock.release()
+    assert receiver.get(timeout=3) == 1
+
+
+class RacingReader:
+    """Reports one message arriving that another consumer then reads first."""
+
+    def __init__(self, reader):
+        self.reader = reader
+        self.announced = False
+
+    def poll(self, timeout=0.0):
+        if not self.announced:
+            self.announced = True
+            return True
+        return self.reader.poll(timeout)
+
+    def __getattr__(self, name):
+        return getattr(self.reader, name)
+
+
+def test_get_waits_again_when_another_consumer_takes_the_message(make_pair, monkeypatch):
+    sender, receiver = make_pair()
+    data_queue = receiver._data_queue
+    monkeypatch.setattr(data_queue, "_reader", RacingReader(data_queue._reader))
+    with pytest.raises(Empty):
+        receiver.get(timeout=0.1)
+    assert data_queue._reader.announced
+    sender.put("next")
+    assert receiver.get(timeout=3) == "next"
+
+
+def test_get_from_a_queue_closed_in_this_process_fails_like_multiprocessing(make_pair):
+    sender, receiver = make_pair()
+    sender.close()  # Both endpoints live here, so this closes the shared queue objects
+    with pytest.raises(ValueError, match="is closed"):
+        receiver.get(timeout=0)
 
 
 def fail_to_open(path):
@@ -499,40 +579,45 @@ def test_freed_block_is_not_acknowledged():
     # The sender already freed the block; nothing is left for it to release.
     allocation, message = serialize(42)
     release_shared_memory(allocation)
-    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    data_queue, ack_queue = metadata_queue(), LocalQueue()
     receiver = SharedMemoryReceiver(data_queue, ack_queue)
-    data_queue.put_nowait(message)
-    with pytest.raises(FileNotFoundError, match="freed before it was received"):
-        receiver.get_nowait()
-    assert ack_queue.empty()
+    try:
+        data_queue.put_nowait(message)
+        with pytest.raises(FileNotFoundError, match="freed before it was received"):
+            receiver.get(timeout=3)
+        assert ack_queue.empty()
+    finally:
+        close_queue(data_queue)
 
 
 def test_block_recreated_empty_while_attaching_is_not_acknowledged():
     # On Windows, attaching to a name freed mid-attach creates a new zero-filled block.
     allocation, message = serialize(42)
-    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    data_queue, ack_queue = metadata_queue(), LocalQueue()
     receiver = SharedMemoryReceiver(data_queue, ack_queue)
     try:
         allocation.buf[0] = 0
         data_queue.put_nowait(message)
         with pytest.raises(FileNotFoundError, match="freed before it was received"):
-            receiver.get_nowait()
+            receiver.get(timeout=3)
         assert ack_queue.empty()
     finally:
         release_shared_memory(allocation)
+        close_queue(data_queue)
 
 
 def test_file_not_found_while_unpickling_is_still_acknowledged():
     allocation, message = serialize(OpensFileOnLoad())
-    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    data_queue, ack_queue = metadata_queue(), LocalQueue()
     receiver = SharedMemoryReceiver(data_queue, ack_queue)
     try:
         data_queue.put_nowait(message)
         with pytest.raises(FileNotFoundError, match="Missing input file"):
-            receiver.get_nowait()
+            receiver.get(timeout=3)
         assert ack_queue.get_nowait() == message.sequence
     finally:
         release_shared_memory(allocation)
+        close_queue(data_queue)
 
 
 def test_many_freed_messages_do_not_block_receiver_close():
@@ -540,14 +625,13 @@ def test_many_freed_messages_do_not_block_receiver_close():
     # sender no longer read, so close() waited forever for the queue feeder to flush it.
     allocation, message = serialize(42)
     release_shared_memory(allocation)
-    data_queue = LocalQueue()
-    ack_queue = mp.get_context("spawn").Queue()
+    data_queue, ack_queue = metadata_queue(), metadata_queue()
     receiver = SharedMemoryReceiver(data_queue, ack_queue)
     try:
         for _ in range(5_000):
             data_queue.put_nowait(message)
             with pytest.raises(FileNotFoundError):
-                receiver.get_nowait()
+                receiver.get(timeout=3)
         closer = threading.Thread(target=receiver.close, daemon=True)
         closer.start()
         closer.join(10)
@@ -558,8 +642,8 @@ def test_many_freed_messages_do_not_block_receiver_close():
         with suppress(OSError):
             while ack_queue._reader.poll(0.1):
                 ack_queue._reader.recv_bytes()
-        ack_queue.close()
-        ack_queue.join_thread()
+        close_queue(ack_queue)
+        close_queue(data_queue)
 
 
 def test_cleanup_error_does_not_leave_other_allocations_or_queues_open(make_pair, monkeypatch):

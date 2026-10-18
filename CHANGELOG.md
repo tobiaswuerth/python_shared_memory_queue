@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.2.3
+
+- Fix producers of different pairs still rejecting each other when the creating process
+  kept neither endpoint, for example an orchestrator that wires producer and consumer
+  processes and keeps only the processes. 4.2.2 fixed this only while the receiver was
+  kept. The pair's owner is now an operating-system lock instead of a slot in
+  multiprocessing's shared heap, which was handed to the next pair once released, so no
+  two pairs can share an owner however their endpoints are kept.
+- Fix a deadlock: killing a consumer while it waited for a message, for example when a
+  supervisor scales a worker pool down, starved every other consumer of the pair forever.
+  Receivers now wait for data without holding the queue's cross-process read lock and take
+  it only to read a message that has arrived.
+- Add end-to-end tests of real deployment patterns: orchestrated pipelines, one pair per
+  producer, worker pools, two-stage pipelines, request/response loops, threaded producers,
+  backpressure, mixed real-world payloads, recycled and crashed consumers, crashed
+  producers, idle consumers being killed, and `ProcessPoolExecutor` workers. They wait on
+  events instead of sleeps, and the single-process tests alone cover every line.
+- Document how long to keep endpoints referenced, and how pairs behave when processes
+  crash.
+
 ## 4.2.2
 
 - Fix producers of different pairs rejecting each other with "A shared-memory pair

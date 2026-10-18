@@ -177,9 +177,13 @@ reused or freed and can be modified freely.
 Create the pair in the parent process and pass the endpoints to workers as `Process`
 arguments, the same way as a `multiprocessing.Queue`. Use the same context for the pair
 and the processes. A sender can be passed to another process only **before** its first
-`put`; after that it belongs to the process that used it. The creating process may drop its
-sender once the producer has started, but should keep the receiver (or the sender) while the
-pair is in use: the pair's queues and its producer-owner slot live with them.
+`put`; after that it belongs to the process that used it.
+
+As with a `multiprocessing.Queue`, keep an endpoint referenced in the creating process until
+the processes using the pair have started. With `spawn` and `forkserver` on Linux and macOS,
+a starting child reopens the pair's semaphores by name, and the names disappear once the
+creating process lets go of them. After that, the creating process may drop endpoints it
+does not use, and may create as many further pairs as it needs.
 
 ```python
 ctx = mp.get_context("spawn")  # "fork" and "forkserver" also work
@@ -243,6 +247,25 @@ while messages are still unacknowledged, they are discarded and the sender emits
 
 When both endpoints live in one process, drain before closing either of them. A sentinel
 such as `None` is a simple way to tell consumers that the stream has ended.
+
+### Crashes and deadlocks
+
+- **Pass timeouts when a peer can die.** `get`, `put`, and `wait_for_all_ack` without a
+  timeout wait forever for a process that no longer exists, as with a
+  `multiprocessing.Queue`.
+- **A crashed consumer loses at most the message it was handling.** Messages it never
+  received go to the next consumer, including one started to replace it. If the crash
+  also lost that message's acknowledgement, its slot of capacity stays taken until the
+  sender closes; closing still never blocks and frees every block.
+- **Killing an idle consumer is safe.** Receivers wait for data without holding the
+  queue's read lock, so the other consumers keep receiving.
+- **Stop consumers cooperatively when you can,** for example with one sentinel each. A
+  consumer killed during the brief moment it reads a message, or on Linux and macOS while
+  its acknowledgement is being written, can still leave the pair's queue locked, just as
+  it would a `multiprocessing.Queue`.
+- **A crashed producer's unread messages** stay readable on Linux and macOS, where a block
+  outlives its creator until it is unlinked. On Windows they are freed with the producer,
+  and `get` raises `FileNotFoundError` for each of them.
 
 ### NumPy arrays
 
