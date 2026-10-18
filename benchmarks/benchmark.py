@@ -11,7 +11,9 @@ from contextlib import redirect_stderr
 from datetime import UTC, datetime
 from pathlib import Path
 
-from py_sharedmemory import create_shared_memory_pair
+from py_sharedmemory import __version__, create_shared_memory_pair
+
+TRANSPORTS = ("standard", "shared")
 
 
 def _receive(receiver, count, warmup, control, size):
@@ -104,6 +106,7 @@ def main(argv=None):
     parser.add_argument("--repeats", type=_positive_int, default=3)
     parser.add_argument("--payload", choices=["numpy", "bytes"], default="numpy")
     parser.add_argument("--start-method", choices=mp.get_all_start_methods(), default="spawn")
+    parser.add_argument("--label", help="platform name for reports, e.g. 'Linux x64'")
     parser.add_argument("--json", type=Path, help="optional result file")
     args = parser.parse_args(argv)
     if args.payload == "numpy" and any(size % 4 for size in args.sizes):
@@ -115,8 +118,11 @@ def main(argv=None):
     results = []
     report = {
         "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "label": args.label,
+        "py_sharedmemory": __version__,
         "python": platform.python_version(),
         "platform": platform.platform(),
+        "machine": platform.machine(),
         "processor": platform.processor(),
         "start_method": args.start_method,
         "capacity": args.capacity,
@@ -130,35 +136,54 @@ def main(argv=None):
     for size in args.sizes:
         count = args.messages or min(1_000, max(1, 2**29 // size))
         payload = np.ones(size // 4, dtype=np.float32) if args.payload == "numpy" else b"x" * size
-        for transport in ("standard", "shared"):
-            row = {"transport": transport, "size": size, "messages": count}
-            durations = []
-            diagnostics = io.StringIO()
-            try:
-                with redirect_stderr(diagnostics):
-                    for _ in range(args.repeats):
-                        durations.append(measure(transport, payload, count, args.capacity, ctx))
-            except Exception as error:
-                row.update(status="failed", error=f"{type(error).__name__}: {error}")
-                if diagnostics.getvalue():
-                    row["stderr"] = diagnostics.getvalue()
+        rows = {
+            transport: {"transport": transport, "size": size, "messages": count}
+            for transport in TRANSPORTS
+        }
+        durations: dict[str, list[float]] = {transport: [] for transport in TRANSPORTS}
+        for repeat in range(args.repeats):
+            # Shared runners drift; alternating the order spreads it over both transports.
+            for transport in TRANSPORTS if repeat % 2 == 0 else TRANSPORTS[::-1]:
+                row = rows[transport]
+                if "error" in row:
+                    continue
+                diagnostics = io.StringIO()
+                try:
+                    with redirect_stderr(diagnostics):
+                        duration = measure(transport, payload, count, args.capacity, ctx)
+                except Exception as error:
+                    row["error"] = f"{type(error).__name__}: {error}"
+                    if diagnostics.getvalue():
+                        row["stderr"] = diagnostics.getvalue()
+                else:
+                    durations[transport].append(duration)
+        for transport in TRANSPORTS:
+            row = rows[transport]
+            if "error" in row:
+                durations[transport] = []
+                row["status"] = "failed"
                 print(f"{size:12,d}  {transport:>9}  FAILED: {row['error']}", flush=True)
             else:
-                duration = statistics.median(durations)
-                throughput = size * count / duration / 2**20
-                latency = duration * 1_000 / count
+                speeds = sorted(
+                    size * count / duration / 2**20 for duration in durations[transport]
+                )
+                latency = statistics.median(durations[transport]) * 1_000 / count
                 row.update(
                     status="ok",
-                    median_mib_per_second=throughput,
+                    median_mib_per_second=statistics.median(speeds),
+                    min_mib_per_second=speeds[0],
+                    max_mib_per_second=speeds[-1],
                     median_ms_per_message=latency,
                 )
                 print(
-                    f"{size:12,d}  {transport:>9}  {throughput:10.1f}  {latency:12.3f}", flush=True
+                    f"{size:12,d}  {transport:>9}  {row['median_mib_per_second']:10.1f}"
+                    f"  {latency:12.3f}",
+                    flush=True,
                 )
-            row["durations_seconds"] = durations
+            row["durations_seconds"] = durations[transport]
             results.append(row)
-            if args.json:
-                args.json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        if args.json:
+            args.json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
