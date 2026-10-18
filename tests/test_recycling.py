@@ -11,7 +11,7 @@ from py_sharedmemory import SharedMemorySender
 from py_sharedmemory import sender as sender_module
 from py_sharedmemory.convert import deserialize
 
-from .helpers import LocalQueue, assert_unlinked, block_names, pooled_names
+from .helpers import LocalQueue, assert_unlinked, block_names, forget_mappings, pooled_names
 
 MiB = 2**20
 
@@ -90,9 +90,31 @@ def test_pooled_block_is_reused_only_when_it_fits(make_pair, first_size, second_
     # A miss drops the pooled block, so the pool never outgrows capacity.
     assert not sender._pool
     if not reused:
+        forget_mappings(receiver)
         assert_unlinked(first_name)
     np.testing.assert_array_equal(receiver.get(timeout=3), payload)
     assert sender.wait_for_all_ack(timeout=3)
+
+
+class Block:
+    def __init__(self, size):
+        self.size = size
+
+
+@pytest.mark.parametrize(
+    ("block_size", "message_size", "fits"),
+    [
+        pytest.param(8 * MiB, 4 * MiB, True, id="exactly-half-full"),
+        pytest.param(8 * MiB, 4 * MiB - 1, False, id="just-under-half-full"),
+        pytest.param(8 * MiB, 8 * MiB, True, id="exactly-full"),
+        pytest.param(8 * MiB, 8 * MiB + 1, False, id="one-byte-too-large"),
+        pytest.param(MiB, 1, True, id="small-block-tiny-message"),
+        pytest.param(MiB + 1, 1, False, id="just-over-small-block"),
+        pytest.param(MiB + 2, MiB // 2 + 1, True, id="just-over-small-block-half-full"),
+    ],
+)
+def test_reuse_rule_boundaries(block_size, message_size, fits):
+    assert sender_module._fits(Block(block_size), message_size) is fits
 
 
 def test_blocks_are_rounded_up_to_whole_pages(make_pair):
@@ -112,6 +134,7 @@ def test_pool_keeps_only_the_newest_blocks(make_pair, monkeypatch):
     assert [receiver.get(timeout=3) for _ in range(4)] == list(range(4))
     assert sender.wait_for_all_ack(timeout=3)
     assert pooled_names(sender) == names[2:]
+    forget_mappings(receiver)
     for name in names[:2]:
         assert_unlinked(name)
 
@@ -125,6 +148,7 @@ def test_pool_stays_within_its_byte_limit(make_pair, monkeypatch):
     assert [receiver.get(timeout=3) for _ in range(3)] == list(range(3))
     assert sender.wait_for_all_ack(timeout=3)
     assert pooled_names(sender) == names[1:]
+    forget_mappings(receiver)
     assert_unlinked(names[0])
 
 
@@ -192,6 +216,7 @@ def test_close_frees_pooled_blocks(make_pair):
     names = pooled_names(sender)
     sender.close()
     assert not sender._pool
+    forget_mappings(receiver)
     for name in names:
         assert_unlinked(name)
 
@@ -214,6 +239,7 @@ def test_close_reports_pool_cleanup_errors_and_frees_the_rest(make_pair, monkeyp
     with pytest.raises(ExceptionGroup, match="Failed to close"):
         sender.close()
     assert not sender._pool
+    forget_mappings(receiver)
     for name in names:
         assert_unlinked(name)
 

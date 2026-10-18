@@ -16,17 +16,18 @@ from queue import Empty, Full
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
+from ._timeouts import normalize_timeout
 from .convert import SharedMemoryMessage, create_shared_memory, release_shared_memory, serialize
 
 if TYPE_CHECKING:
-    from multiprocessing.sharedctypes import Synchronized
+    from multiprocessing.synchronize import Lock
 
 # A POSIX block lives on by name until it is unlinked, so the sender can unmap the blocks it
 # cannot keep mapped and close their file descriptors. Windows frees a block with its last
 # handle, so it keeps every unread block mapped.
 _UNMAP_EXCESS_BLOCKS = sys.platform != "win32"
 
-# Each mapped POSIX block holds two file descriptors. Unread blocks beyond this many are
+# Each mapped POSIX block holds a file descriptor. Unread blocks beyond this many are
 # unmapped right after writing, and freed rather than reused once acknowledged.
 _MAX_MAPPED_BLOCKS = 8
 
@@ -74,7 +75,7 @@ class SharedMemorySender:
         data_queue: Queue[SharedMemoryMessage],
         ack_queue: Queue[int],
         *,
-        producer_owner: Synchronized[int] | None = None,
+        owner_lock: Lock | None = None,
     ) -> None:
         _validate_capacity(capacity)
         self.capacity = capacity
@@ -89,7 +90,9 @@ class SharedMemorySender:
         self._sequence = 0
         self._pending_count = 0
         self._condition = threading.Condition()
-        self._producer_owner = producer_owner
+        # The producing process takes this pair-wide lock on its first put and never
+        # releases it, so any other process trying to produce is refused.
+        self._owner_lock = owner_lock
         self._process_id: int | None = None
         self._ack_thread: threading.Thread | None = None
         self._ack_error: Exception | None = None
@@ -112,7 +115,7 @@ class SharedMemorySender:
 
         Raises:
             queue.Full: No capacity became available in time.
-            BrokenPipeError: The sender is closed.
+            BrokenPipeError: The sender, or the pair's queue in this process, is closed.
             RuntimeError: Called from a process other than the producing process.
 
         Serialization errors propagate unchanged, and the sender stays usable.
@@ -139,6 +142,7 @@ class SharedMemorySender:
             BrokenPipeError: The sender is closed, or closes while waiting.
         """
         self._check_process()
+        timeout = normalize_timeout(timeout)
         with self._condition:
             self._ensure_open()
             drained = self._condition.wait_for(
@@ -150,17 +154,39 @@ class SharedMemorySender:
     def close(self) -> None:
         """Free unread messages and reusable blocks, stop acknowledgements, close the queues.
 
-        Idempotent. Unread messages are discarded silently, so drain with
-        `wait_for_all_ack` first. Also runs automatically when the producing process
-        exits normally, warning if that discards messages.
+        Idempotent, and the acknowledgement thread has stopped once it returns. Unread
+        messages are discarded silently, so drain with `wait_for_all_ack` first. Also runs
+        automatically when the producing process exits normally, warning if that discards
+        messages.
         """
         self._check_process()
         errors: list[Exception] = []
         with self._condition:
-            if self._closed:
-                return
-            self._closed = True
-            discarding_messages = self._pending_count > 0
+            already_closed = self._closed
+            if not already_closed:
+                self._closed = True
+                discarding_messages = self._pending_count > 0
+                self._free_all_blocks(errors)
+        # Also when already closed: the acknowledgement thread may have closed the sender
+        # and still be closing the queues.
+        self._join_ack_thread()
+        if already_closed:
+            return
+        for queue in (self._data_queue, self._ack_queue):
+            try:
+                if discarding_messages:
+                    # Unread metadata must not keep the queue feeder alive at exit.
+                    queue.cancel_join_thread()
+                queue.close()
+                if not discarding_messages:
+                    queue.join_thread()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("Failed to close shared-memory sender", errors)
+
+    def _free_all_blocks(self, errors: list[Exception]) -> None:
+        with self._condition:
             for sequence in list(self._blocks):
                 try:
                     self._discard(sequence)
@@ -175,20 +201,9 @@ class SharedMemorySender:
             if self._finalizer is not None:
                 self._finalizer.cancel()
 
+    def _join_ack_thread(self) -> None:
         if self._ack_thread is not None and self._ack_thread is not threading.current_thread():
             self._ack_thread.join(timeout=1)
-        for queue in (self._data_queue, self._ack_queue):
-            try:
-                if discarding_messages:
-                    # Unread metadata must not keep the queue feeder alive at exit.
-                    queue.cancel_join_thread()
-                queue.close()
-                if not discarding_messages:
-                    queue.join_thread()
-            except Exception as error:
-                errors.append(error)
-        if errors:
-            raise ExceptionGroup("Failed to close shared-memory sender", errors)
 
     def __enter__(self) -> Self:
         self._check_process()
@@ -249,6 +264,7 @@ class SharedMemorySender:
 
     def _reserve_slot(self, block: bool, timeout: float | None) -> int:
         self._check_process()
+        timeout = normalize_timeout(timeout)
         deadline = None
         if block and timeout is not None:
             deadline = time.monotonic() + max(0, timeout)
@@ -294,11 +310,16 @@ class SharedMemorySender:
                 raise
             if allocation.buf is not None:
                 self._mapped_in_flight += 1
+            if allocation.buf is None or allocation.size > _MAX_POOLED_BYTES:
+                # Freed once acknowledged, so receivers should not keep it mapped.
+                message = message._replace(block=0)
             try:
                 self._ensure_open()
                 self._data_queue.put_nowait(message)
-            except BaseException:
+            except BaseException as error:
                 self._discard(message.sequence)
+                if isinstance(error, ValueError):  # Only a closed multiprocessing.Queue
+                    raise BrokenPipeError("The pair's queue was closed in this process") from error
                 raise
 
     def _release_slot(self) -> None:
@@ -350,13 +371,9 @@ class SharedMemorySender:
     def _start_ack_thread(self) -> None:
         if self._process_id is not None:
             return
-        process_id = os.getpid()
-        if self._producer_owner is not None:
-            with self._producer_owner.get_lock():
-                if self._producer_owner.value not in (0, process_id):
-                    raise RuntimeError("A shared-memory pair supports one producing process")
-                self._producer_owner.value = process_id
-        self._process_id = process_id
+        if self._owner_lock is not None and not self._owner_lock.acquire(block=False):
+            raise RuntimeError("A shared-memory pair supports one producing process")
+        self._process_id = os.getpid()
         try:
             self._ack_thread = threading.Thread(
                 target=self._process_acknowledgements, name="shared-memory-acks", daemon=True
@@ -369,9 +386,8 @@ class SharedMemorySender:
             self._finalizer = None
             self._ack_thread = None
             self._process_id = None
-            if self._producer_owner is not None:
-                with self._producer_owner.get_lock():
-                    self._producer_owner.value = 0
+            if self._owner_lock is not None:
+                self._owner_lock.release()
             raise
 
     def _process_acknowledgements(self) -> None:
@@ -381,6 +397,11 @@ class SharedMemorySender:
             except Empty:
                 continue
             except Exception as error:
+                if isinstance(error, OSError):
+                    # Keep the error but not its frames: on Windows, a read cut off by its
+                    # pipe closing holds an overlapped request there that can no longer be
+                    # cancelled, and must be released now rather than freed at exit.
+                    error.__traceback__ = None
                 with self._condition:
                     self._ack_error = error
                 try:

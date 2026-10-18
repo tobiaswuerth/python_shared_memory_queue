@@ -1,3 +1,5 @@
+import errno
+import os
 import pickle
 import sys
 import tracemalloc
@@ -270,6 +272,14 @@ def test_copy_failure_unlinks_new_allocation(monkeypatch):
             self.name = self.handle.name
             created.append(self.name)
 
+        @property
+        def _fd(self):
+            return self.handle._fd
+
+        @_fd.setter
+        def _fd(self, descriptor):
+            self.handle._fd = descriptor
+
         def close(self):
             self.handle.close()
 
@@ -349,6 +359,116 @@ def test_receive_failures_always_close_attachment(failure, monkeypatch):
         assert attached[0].buf is None
     finally:
         release_shared_memory(handle)
+
+
+@pytest.fixture
+def created_blocks(monkeypatch):
+    names = []
+    real = convert.SharedMemory
+
+    def record(**kwargs):
+        block = real(**kwargs)
+        names.append(block.name)
+        return block
+
+    monkeypatch.setattr(convert, "SharedMemory", record)
+    return names
+
+
+def reserve_pages_with(monkeypatch, behaviour):
+    calls = []
+
+    def fake_fallocate(fd, offset, length):
+        calls.append((offset, length))
+        if behaviour is not None:
+            raise behaviour
+
+    monkeypatch.setattr(convert, "_RESERVE_PAGES", True)
+    monkeypatch.setattr(os, "posix_fallocate", fake_fallocate, raising=False)
+    return calls
+
+
+def test_new_blocks_reserve_their_pages_up_front(monkeypatch):
+    calls = reserve_pages_with(monkeypatch, None)
+    block = convert.create_shared_memory(8_192)
+    try:
+        assert calls == [(0, 8_192)]
+        assert block.size >= 8_192
+    finally:
+        release_shared_memory(block)
+
+
+def test_full_shared_memory_raises_instead_of_crashing(monkeypatch, created_blocks):
+    # Docker's 64 MiB /dev/shm: without a reservation, the first write past it is a SIGBUS.
+    reserve_pages_with(monkeypatch, OSError(errno.ENOSPC, "No space left on device"))
+    with pytest.raises(OSError, match="No space") as caught:
+        convert.create_shared_memory(8_192)
+    assert caught.value.errno == errno.ENOSPC
+    (name,) = created_blocks
+    assert_unlinked(name)
+
+
+@pytest.mark.parametrize("code", [errno.EOPNOTSUPP, errno.EINVAL, errno.ENOSYS])
+def test_reservation_is_skipped_where_unsupported(monkeypatch, code):
+    reserve_pages_with(monkeypatch, OSError(code, "Not supported"))
+    block = convert.create_shared_memory(8_192)
+    try:
+        block.buf[:4] = b"data"
+    finally:
+        release_shared_memory(block)
+
+
+def test_interrupted_reservation_frees_the_block(monkeypatch, created_blocks):
+    reserve_pages_with(monkeypatch, KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        convert.create_shared_memory(8_192)
+    assert_unlinked(created_blocks[0])
+
+
+def open_descriptors():
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(directory):
+            return len(os.listdir(directory))
+    pytest.skip("Cannot count open file descriptors here")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file descriptors")
+def test_a_mapped_block_holds_one_descriptor():
+    # SharedMemory keeps its own descriptor and mmap keeps a duplicate; one is enough.
+    release_shared_memory(convert.create_shared_memory(8_192))  # Starts the resource tracker
+    before = open_descriptors()
+    block = convert.create_shared_memory(8_192)
+    try:
+        assert open_descriptors() - before == 1
+        block.buf[:4] = b"data"
+        assert bytes(block.buf[:4]) == b"data"
+    finally:
+        release_shared_memory(block)
+    assert open_descriptors() == before
+    assert_unlinked(block.name)
+
+
+@pytest.mark.parametrize("close_spare", [False, True])
+def test_spare_descriptor_is_closed_only_where_one_exists(monkeypatch, close_spare):
+    closed = []
+    real_close = os.close
+
+    def record(descriptor):
+        closed.append(descriptor)
+        if descriptor >= 0:
+            real_close(descriptor)
+
+    monkeypatch.setattr(convert, "_CLOSE_SPARE_DESCRIPTOR", close_spare)
+    monkeypatch.setattr(os, "close", record)
+    block = convert.create_shared_memory(8_192)
+    try:
+        assert len(closed) == int(close_spare)
+        if close_spare:
+            assert block._fd == -1
+        block.buf[:4] = b"data"
+    finally:
+        monkeypatch.undo()
+        release_shared_memory(block)
 
 
 def test_cleanup_tolerates_already_unlinked_blocks():

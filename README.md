@@ -13,9 +13,9 @@
 **A fast `multiprocessing.Queue` alternative for large Python objects and NumPy arrays.**
 Payloads travel between processes through shared memory instead of pipes; the queues
 underneath carry only a few bytes of metadata per message. Multi-megabyte batches,
-images, and simulation states arrive 1.4× (Windows) to 6× (Linux) faster, on macOS even
-small messages beat a bounded `multiprocessing.Queue`, and transfers too large for
-`multiprocessing.Queue` still work.
+images, and simulation states arrive up to 3.6× faster on Windows and up to 7.4× faster on
+Linux, on macOS even small messages beat a bounded `multiprocessing.Queue`, and transfers
+too large for `multiprocessing.Queue` still work.
 
 - **Familiar API:** `put` / `get` with `block`, `timeout`, `put_nowait` / `get_nowait`,
   `queue.Full`, and `queue.Empty`.
@@ -79,15 +79,15 @@ More complete, runnable programs:
 
 ## When to use it
 
-Use py-sharedmemory when individual messages are large: **from about 1 MB on Linux and
-Windows x86-64, and from about 10 MB on Windows ARM64**. Typical payloads are NumPy
-arrays, image or video frames, RL rollouts, large `bytes`, or big nested objects. On
+Use py-sharedmemory when individual messages are **about 1 MB or larger** on Linux and
+Windows; on Windows ARM64 it pulls clearly ahead from about 10 MB. Typical payloads are
+NumPy arrays, image or video frames, RL rollouts, large `bytes`, or big nested objects. On
 **macOS** it was faster at every size measured, from 1 kB up; see
 [Performance](#performance).
 
 On Linux and Windows, prefer `multiprocessing.Queue` for small messages: up to about
-100 kB it is up to about 3.5× faster, because mapping a shared-memory block for every
-message costs more than the pipe.
+100 kB it is 1.5–4× faster, because handling a shared-memory block for every message
+costs more than the pipe.
 
 On free-threaded Python (`python3.14t` and later), threads run Python code in parallel.
 If everything your workers use is free-threading safe, threads and `queue.Queue` pass
@@ -106,28 +106,32 @@ Speedup over `multiprocessing.Queue`; above 1× means py-sharedmemory is faster.
 
 | Platform | 1 kB | 10 kB | 100 kB | 1 MB | 10 MB | 100 MB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Linux x64 | 0.29× | 0.29× | 0.44× | **3.00×** | **4.12×** | **2.95×** |
-| Linux arm64 | 0.36× | 0.37× | 0.57× | **2.57×** | **5.75×** | **2.31×** |
-| Windows x64 | 0.29× | 0.30× | 0.36× | **1.38×** | **1.42×** | **1.35×** |
-| Windows arm64 | 0.28× | 0.30× | 0.55× | 0.65× | **1.52×** | **1.51×** |
-| macOS arm64 | **11.35×** | **10.86×** | **11.18×** | **7.94×** | **3.49×** | **3.53×** |
+| Linux x64 | 0.33× | 0.32× | 0.45× | **3.32×** | **5.30×** | **2.80×** |
+| Linux arm64 | 0.32× | 0.36× | 0.52× | **2.57×** | **7.42×** | **2.68×** |
+| Windows x64 | 0.25× | 0.28× | 0.51× | **2.50×** | **3.07×** | **3.34×** |
+| Windows arm64 | 0.30× | 0.31× | 0.63× | **1.11×** | **3.06×** | **3.62×** |
+| macOS arm64 | **11.87×** | **22.58×** | **17.02×** | **10.87×** | **5.34×** | **5.42×** |
 
-- **Linux, x86-64 and ARM64:** 2.3–5.8× faster from 1 MB. Up to 100 kB,
-  `multiprocessing.Queue` is up to 3.5× faster.
-- **Windows x86-64:** about 1.4× faster from 1 MB, and about 3× slower up to 100 kB.
-- **Windows ARM64:** the crossover comes later. `multiprocessing.Queue` still wins at 1 MB,
-  and py-sharedmemory is 1.5× faster from 10 MB.
-- **macOS (Apple Silicon):** 3.5–11× faster at every size. macOS has no timed semaphore
+- **Linux, x86-64 and ARM64:** 2.6–7.4× faster from 1 MB. Up to 100 kB,
+  `multiprocessing.Queue` is 2–3× faster.
+- **Windows x86-64:** 2.5–3.3× faster from 1 MB, and 2–4× slower up to 100 kB.
+- **Windows ARM64:** about even at 1 MB, and 3–3.6× faster from 10 MB.
+- **macOS (Apple Silicon):** 5–23× faster at every size. macOS has no timed semaphore
   wait, so a full bounded `multiprocessing.Queue` whose `put` has a timeout, as here,
   [polls with sleeps of up to 20 ms](https://github.com/python/cpython/blob/main/Modules/_multiprocessing/semaphore.c).
   py-sharedmemory enforces its capacity with a thread condition instead.
 
+Version 4.3.0 moves 1–100 MB messages up to 2.4× faster than 4.2.1 on Windows, up to 1.7×
+on macOS, and up to 1.45× on Linux, because receivers now keep their mappings of the
+blocks the sender reuses.
+
 Measured by the [benchmark workflow](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/.github/workflows/benchmark.yml)
-on GitHub-hosted runners on 2026-10-18: py-sharedmemory 4.2.1, Python 3.14.8, NumPy 2.5.4,
+on GitHub-hosted runners on 2026-10-18: py-sharedmemory 4.3.0, Python 3.14.8, NumPy 2.5.4,
 contiguous float32 arrays, `spawn`, capacity 2 for both queues, and the median of 5 runs
 that alternate between the two. The runners are shared virtual machines, so compare the
-speedups, not absolute throughput; run-to-run spread is mostly within 20%, and up to
-about 50% on macOS. See the [raw results](https://github.com/tobiaswuerth/python_shared_memory_queue/tree/main/benchmarks/results/platforms).
+speedups, not absolute throughput. Run-to-run spread is mostly within 20% on Linux and
+Windows and larger on macOS, whose speedups dwarf it. See the
+[raw results](https://github.com/tobiaswuerth/python_shared_memory_queue/tree/main/benchmarks/results/platforms).
 The workflow reruns on every release.
 
 ### Large messages on a desktop
@@ -162,8 +166,8 @@ in fresh pages on every `put` at those sizes.
    received message when one fits, otherwise a new one.
 2. Only the block's name, buffer sizes, and a sequence number travel through a
    `multiprocessing.Queue`.
-3. `get()` attaches to the block, copies the data into local memory, unpickles it, and
-   sends an acknowledgement back.
+3. `get()` maps the block, or reuses its mapping from an earlier message, copies the data
+   into local memory, unpickles it, and sends an acknowledgement back.
 4. A background thread in the producer makes the block available for reuse when the
    acknowledgement arrives. `capacity` limits how many messages can be outstanding.
 
@@ -177,9 +181,13 @@ reused or freed and can be modified freely.
 Create the pair in the parent process and pass the endpoints to workers as `Process`
 arguments, the same way as a `multiprocessing.Queue`. Use the same context for the pair
 and the processes. A sender can be passed to another process only **before** its first
-`put`; after that it belongs to the process that used it. The creating process may drop its
-sender once the producer has started, but should keep the receiver (or the sender) while the
-pair is in use: the pair's queues and its producer-owner slot live with them.
+`put`; after that it belongs to the process that used it.
+
+As with a `multiprocessing.Queue`, keep an endpoint referenced in the creating process until
+the processes using the pair have started. With `spawn` and `forkserver` on Linux and macOS,
+a starting child reopens the pair's semaphores by name, and the names disappear once the
+creating process lets go of them. After that, the creating process may drop endpoints it
+does not use, and may create as many further pairs as it needs.
 
 ```python
 ctx = mp.get_context("spawn")  # "fork" and "forkserver" also work
@@ -200,6 +208,12 @@ message that fills at least half of it, or for any message that fits a block of 
 1 MiB. The sender keeps at most 8 such blocks and 256 MiB, never more blocks than the
 capacity allows, and frees them on `close()`. Blocks over 256 MiB are freed once received.
 
+Receivers likewise keep the blocks they read mapped instead of mapping them again for
+every message: each receiving thread keeps at most `capacity` (up to 8) blocks and
+256 MiB, and `close()` releases them. On Windows, where a block lives while any process
+maps it, a receiver therefore keeps a block its sender has freed alive until the receiver
+reads other blocks or closes.
+
 ### Timeouts and non-blocking calls
 
 ```python
@@ -215,6 +229,9 @@ try:
 except Empty:
     ...
 ```
+
+`timeout=None` and `timeout=math.inf` both wait without limit. Negative timeouts behave
+like `0`, and a NaN timeout raises `ValueError`.
 
 ### Multiple consumers and threads
 
@@ -244,6 +261,25 @@ while messages are still unacknowledged, they are discarded and the sender emits
 When both endpoints live in one process, drain before closing either of them. A sentinel
 such as `None` is a simple way to tell consumers that the stream has ended.
 
+### Crashes and deadlocks
+
+- **Pass timeouts when a peer can die.** `get`, `put`, and `wait_for_all_ack` without a
+  timeout wait forever for a process that no longer exists, as with a
+  `multiprocessing.Queue`.
+- **A crashed consumer loses at most the message it was handling.** Messages it never
+  received go to the next consumer, including one started to replace it. If the crash
+  also lost that message's acknowledgement, its slot of capacity stays taken until the
+  sender closes; closing still never blocks and frees every block.
+- **Killing an idle consumer is safe.** Receivers wait for data without holding the
+  queue's read lock, so the other consumers keep receiving.
+- **Stop consumers cooperatively when you can,** for example with one sentinel each. A
+  consumer killed during the brief moment it reads a message, or on Linux and macOS while
+  its acknowledgement is being written, can still leave the pair's queue locked, just as
+  it would a `multiprocessing.Queue`.
+- **A crashed producer's unread messages** stay readable on Linux and macOS, where a block
+  outlives its creator until it is unlinked. On Windows they are freed with the producer,
+  and `get` raises `FileNotFoundError` for each of them.
+
 ### NumPy arrays
 
 Arrays keep their dtype, shape, and writability. Read-only arrays stay read-only, and
@@ -259,8 +295,10 @@ message alive.
 | --- | --- |
 | `queue.Full` | `put` found no capacity within `timeout` or with `block=False`. |
 | `queue.Empty` | `get` found no message within `timeout` or with `block=False`. |
-| `BrokenPipeError` | The endpoint is closed, or the producer's acknowledgement channel failed. |
+| `BrokenPipeError` | The endpoint is closed, an endpoint in the same process closed the pair, or the producer's acknowledgement channel failed. |
 | `FileNotFoundError` | `get` received a message that the producer freed by closing before it was read. |
+| `OSError` (`ENOSPC`) | `put` found no room for the message in shared memory, for example a full `/dev/shm` in a container. The sender stays usable. |
+| `ValueError` | A timeout is NaN. |
 | `RuntimeError` | A second process tries to produce, or a used sender is passed to another process. |
 | Pickling errors | The object cannot be pickled or unpickled. Both endpoints stay usable, and failed messages are still released. |
 | `RuntimeWarning` (warning) | A `with sender:` block or the producing process ended normally and discarded unacknowledged messages. |
@@ -299,8 +337,9 @@ for the underlying queues; it defaults to `multiprocessing.get_context()`.
 **Docker and Kubernetes:** on Linux, shared memory lives in `/dev/shm`, which containers
 limit to 64 MB by default. Raise it to at least `capacity × largest message`, for example
 `docker run --shm-size=2g` or `shm_size: 2gb` in Docker Compose. In Kubernetes, mount an
-`emptyDir` volume with `medium: Memory` at `/dev/shm`. Otherwise the producer can fail
-with `OSError: [Errno 28] No space left on device` or crash with `SIGBUS`.
+`emptyDir` volume with `medium: Memory` at `/dev/shm`. Otherwise `put` raises
+`OSError: [Errno 28] No space left on device`. Since 4.3.0 the sender reserves each new
+block's pages up front, so a full `/dev/shm` no longer kills the producer with `SIGBUS`.
 
 **Linux:** outside containers, `/dev/shm` usually defaults to half of physical RAM.
 
@@ -319,9 +358,12 @@ the last handle closes, so nothing can leak after a crash.
 producer closed or exited before this message was read. Call `wait_for_all_ack()` before
 closing the sender; the sender also warns when this happens.
 
-**`OSError: [Errno 24] Too many open files` with many unread messages:** fixed in 4.1.1.
-On Linux and macOS the sender keeps at most 8 blocks mapped for reuse, two file
-descriptors each; other unread messages hold none.
+**`OSError: [Errno 24] Too many open files`:** on Linux and macOS each pair costs a
+process 4 file descriptors for its queues, plus 1 per block the sender keeps for reuse
+and 1 per block a receiving thread keeps mapped, each at most `capacity` (up to 8).
+Unread messages beyond that hold none. Since 4.3.0 a kept block costs one descriptor
+instead of two, and a receiver that runs out releases its kept mappings and retries.
+For many pairs on macOS, whose default limit is 256, raise it with `ulimit -n`.
 
 **`RuntimeError: A shared-memory pair supports one producing process`:** a second
 process called `put`. Create a separate pair for each producer process.

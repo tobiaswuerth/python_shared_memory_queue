@@ -34,13 +34,17 @@ def create_shared_memory_pair(
     context = mp.get_context() if ctx is None else ctx
     if _SHARE_RESOURCE_TRACKER:
         resource_tracker.ensure_running()
-    producer_owner = context.Value("q", 0)
+    # A semaphore rather than a shared Value: a Value's slot in the shared heap is handed to
+    # the next pair once the creating process drops it, which merged two pairs' owners.
+    owner_lock = context.Lock()
     with ExitStack() as cleanup:
         data_queue = context.Queue()
         cleanup.callback(data_queue.close)
         ack_queue = context.Queue()
         cleanup.callback(ack_queue.close)
-        sender = SharedMemorySender(capacity, data_queue, ack_queue, producer_owner=producer_owner)
-        receiver = SharedMemoryReceiver(data_queue, ack_queue, producer_owner=producer_owner)
+        sender = SharedMemorySender(capacity, data_queue, ack_queue, owner_lock=owner_lock)
+        receiver = SharedMemoryReceiver(
+            data_queue, ack_queue, owner_lock=owner_lock, capacity=capacity
+        )
         cleanup.pop_all()  # The endpoints now own both queues.
     return sender, receiver

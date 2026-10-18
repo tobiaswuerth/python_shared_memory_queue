@@ -25,5 +25,5 @@ from .factory import create_shared_memory_pair
 from .receiver import SharedMemoryReceiver
 from .sender import SharedMemorySender
 
-__version__ = "4.2.2"
+__version__ = "4.3.0"
 __all__ = ["SharedMemoryReceiver", "SharedMemorySender", "__version__", "create_shared_memory_pair"]

@@ -2,14 +2,69 @@
 
 from __future__ import annotations
 
+import errno
+import threading
+import time
+import weakref
+from collections import OrderedDict
+from contextlib import suppress
 from multiprocessing.queues import Queue
+from multiprocessing.reduction import ForkingPickler
+from multiprocessing.shared_memory import SharedMemory
+from queue import Empty
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
-from .convert import SharedMemoryMessage, attach, load
+from ._timeouts import normalize_timeout
+from .convert import SharedMemoryMessage, attach, drop_spare_descriptor, load, validate_message
 
 if TYPE_CHECKING:
-    from multiprocessing.sharedctypes import Synchronized
+    from multiprocessing.synchronize import Lock
+
+# Remapping a block for every message costs page faults on every page read. Each receiving
+# thread keeps the blocks the sender reuses mapped, within the same limits as its pool.
+_MAX_CACHED_MAPPINGS = 8
+_MAX_CACHED_BYTES = 256 * 2**20
+
+# How often a waiting get() checks whether its receiver was closed in the meantime.
+_WAKE_INTERVAL = 0.2
+
+
+def _remaining(block: bool, deadline: float | None) -> float | None:
+    if not block:
+        return 0
+    return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+
+class _MappingCache:
+    """One thread's mappings of reusable blocks, least recently used first.
+
+    Only its own thread reads or evicts them, so no mapping is closed while being read.
+    """
+
+    def __init__(self) -> None:
+        self.blocks: OrderedDict[tuple[str, int], SharedMemory] = OrderedDict()
+
+    def find(self, key: tuple[str, int]) -> SharedMemory | None:
+        allocation = self.blocks.get(key)
+        if allocation is not None:
+            self.blocks.move_to_end(key)
+        return allocation
+
+    def add(self, key: tuple[str, int], allocation: SharedMemory, limit: int) -> None:
+        self.blocks[key] = allocation
+        # Evict the oldest mappings, but always keep the one about to be read.
+        while len(self.blocks) > 1 and (
+            len(self.blocks) > limit
+            or sum(block.size for block in self.blocks.values()) > _MAX_CACHED_BYTES
+        ):
+            self.blocks.popitem(last=False)[1].close()
+
+    def close(self) -> None:
+        while self.blocks:
+            # A mapping its thread is still reading stays open until that thread lets go.
+            with suppress(BufferError):
+                self.blocks.popitem()[1].close()
 
 
 class SharedMemoryReceiver:
@@ -25,16 +80,33 @@ class SharedMemoryReceiver:
         data_queue: Queue[SharedMemoryMessage],
         ack_queue: Queue[int],
         *,
-        producer_owner: Synchronized[int] | None = None,
+        owner_lock: Lock | None = None,
+        capacity: int | None = None,
     ) -> None:
         self._data_queue = data_queue
         self._ack_queue = ack_queue
-        # Held only to keep the pair's producer-owner slot allocated while this receiver
-        # lives: the parent usually drops its sender once the producer has started, and a
-        # freed slot would be reused by the next pair's owner, so the producers of two
-        # pairs would reject each other.
-        self._producer_owner = producer_owner
+        # The sender never has more blocks alive than its capacity, so mapping more is waste.
+        self._capacity = capacity
+        # Unused here, but holding it lets the creating process drop its sender: with spawn
+        # and forkserver on Linux and macOS, releasing a lock's last reference deletes its
+        # name, and a child that has not started yet could no longer open it.
+        self._owner_lock = owner_lock
         self._closed = False
+        self._init_mappings()
+
+    def _init_mappings(self) -> None:
+        self._mappings = threading.local()
+        # Every thread's cache, for close(); a finished thread's cache is freed with it.
+        self._caches: weakref.WeakSet[_MappingCache] = weakref.WeakSet()
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        del state["_mappings"], state["_caches"]  # Mappings belong to this process
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._init_mappings()
 
     @property
     def closed(self) -> bool:
@@ -54,19 +126,21 @@ class SharedMemoryReceiver:
 
         Raises:
             queue.Empty: No message arrived in time.
-            BrokenPipeError: The receiver is closed.
+            BrokenPipeError: The receiver, or the pair's queue in this process, is closed.
             FileNotFoundError: The sender freed the message before it was received.
 
         Unpickling errors propagate unchanged; the message is still acknowledged.
         """
         if self._closed:
             raise BrokenPipeError("Receiver is closed")
-        message = self._data_queue.get(block, timeout)
+        message = self._next_message(block, normalize_timeout(timeout))
         # A block that is gone was already freed by its sender, which expects no acknowledgement.
-        allocation = attach(message)
+        allocation, kept = self._map(message)
         try:
             return load(message, allocation)
         finally:
+            if not kept:
+                allocation.close()
             # Failed decoding must still release the sender's memory and capacity.
             self._ack_queue.put_nowait(message.sequence)
 
@@ -74,14 +148,85 @@ class SharedMemoryReceiver:
         """Equivalent to `get(block=False)`."""
         return self.get(block=False)
 
-    def close(self) -> None:
-        """Close this process's queue handles after flushing acknowledgements.
+    def _map(self, message: SharedMemoryMessage) -> tuple[SharedMemory, bool]:
+        """The message's block, and whether this thread keeps it mapped for later messages."""
+        validate_message(message)
+        if not message.block:
+            return attach(message), False
+        cache = getattr(self._mappings, "cache", None)
+        if cache is None:
+            cache = self._mappings.cache = _MappingCache()
+            self._caches.add(cache)
+        key = (message.name, message.block)
+        allocation = cache.find(key)
+        if allocation is None:
+            try:
+                allocation = attach(message)
+            except OSError as error:
+                if error.errno != errno.EMFILE or not cache.blocks:
+                    raise
+                # Kept mappings hold descriptors; give them back rather than fail the get.
+                cache.close()
+                allocation = attach(message)
+            drop_spare_descriptor(allocation)
+            limit = min(_MAX_CACHED_MAPPINGS, self._capacity or _MAX_CACHED_MAPPINGS)
+            cache.add(key, allocation, limit)
+        return allocation, True
 
-        Idempotent. Other processes sharing the receiver are unaffected.
+    def _next_message(self, block: bool, timeout: float | None) -> Any:
+        # multiprocessing.Queue.get holds the queue's cross-process read lock while it waits,
+        # so a consumer killed while idle would leave it taken and starve every other
+        # consumer. Wait without it, and take it only to read a message that has arrived.
+        queue: Any = self._data_queue  # Its reader, read lock and semaphore are private
+        deadline = None if timeout is None else time.monotonic() + max(timeout, 0)
+        while True:
+            self._ensure_pair_open()
+            remaining = _remaining(block, deadline)
+            # Wait in slices, so that closing the receiver wakes a get() without a timeout.
+            step = _WAKE_INTERVAL if remaining is None else min(remaining, _WAKE_INTERVAL)
+            try:
+                if not queue._reader.poll(step):
+                    if remaining is not None and remaining <= step:
+                        raise Empty
+                    continue
+                if not queue._rlock.acquire(block, _remaining(block, deadline)):
+                    raise Empty
+                try:
+                    if not queue._reader.poll():
+                        continue  # Another consumer read it first
+                    data = queue._reader.recv_bytes()
+                    queue._sem.release()
+                finally:
+                    queue._rlock.release()
+            except OSError as error:
+                # The queue feeder closes the pipe once the pair is closed in this process.
+                try:
+                    self._ensure_pair_open()
+                except BrokenPipeError:
+                    # On Windows, the frames of a read cut off this way hold an overlapped
+                    # request that can no longer be cancelled; release it now, not at exit.
+                    error.__traceback__ = None
+                    raise
+                raise
+            return ForkingPickler.loads(data)
+
+    def _ensure_pair_open(self) -> None:
+        if self._closed:
+            raise BrokenPipeError("Receiver is closed")
+        if cast(Any, self._data_queue)._closed:  # By an endpoint in this process
+            raise BrokenPipeError("The pair's queue was closed in this process")
+
+    def close(self) -> None:
+        """Release kept mappings and close this process's queue handles.
+
+        Acknowledgements are flushed first. Idempotent. Other processes sharing the
+        receiver are unaffected.
         """
         if self._closed:
             return
         self._closed = True
+        for cache in list(self._caches):
+            cache.close()
         try:
             self._data_queue.cancel_join_thread()
             self._data_queue.close()

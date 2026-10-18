@@ -1,5 +1,63 @@
 # Changelog
 
+## 4.3.0
+
+Faster receives:
+
+- Receivers keep their mappings of blocks the sender reuses instead of mapping each
+  message's block again, which faulted in every page anew. Each receiving thread keeps at
+  most `capacity` (up to 8) blocks and 256 MiB mapped, and `close()` releases them.
+  Messages carry a random identity for each reusable block, so a new block that takes a
+  freed name is never read through an old mapping. On GitHub's runners, 1–100 MB messages
+  move up to 2.4× faster than with 4.2.1 on Windows, up to 1.7× on macOS, and up to 1.45×
+  on Linux.
+
+Fixes:
+
+- Fix producers of different pairs still rejecting each other when the creating process
+  kept neither endpoint, for example an orchestrator that wires producer and consumer
+  processes and keeps only the processes. 4.2.2 fixed this only while the receiver was
+  kept. The pair's owner is now an operating-system lock instead of a slot in
+  multiprocessing's shared heap, which was handed to the next pair once released, so no
+  two pairs can share an owner however their endpoints are kept.
+- Fix a deadlock: killing a consumer while it waited for a message, for example when a
+  supervisor scales a worker pool down, starved every other consumer of the pair forever.
+  Receivers now wait for data without holding the queue's cross-process read lock and take
+  it only to read a message that has arrived.
+- A thread blocked in `get()` without a timeout now wakes with `BrokenPipeError` when its
+  receiver is closed, instead of waiting forever and keeping the process from exiting.
+- A full `/dev/shm`, 64 MiB by default in Docker, no longer kills the producer with
+  `SIGBUS`: the sender reserves a new block's pages up front on Linux, so `put` raises
+  `OSError` (`ENOSPC`) and the sender stays usable.
+- `timeout=math.inf` now waits without limit in `put`, `get`, and `wait_for_all_ack`
+  instead of raising `OverflowError`; a NaN timeout raises `ValueError`.
+- A block kept mapped costs one file descriptor instead of two on Linux and macOS, and a
+  receiver that runs out of descriptors releases its kept mappings and retries.
+- When an endpoint in the same process closed the pair, `put` and `get` raise
+  `BrokenPipeError` instead of a `ValueError` from inside `multiprocessing`.
+- A process holding both endpoints that closed its receiver first no longer warns at exit
+  on Windows that "the process may crash". Closing the pair cuts off the sender's read of
+  acknowledgements, and the error the sender kept held that unfinished read until exit.
+  `close()` also returns only once the acknowledgement thread has stopped, even when that
+  thread had already closed the sender.
+
+Tests and docs:
+
+- Add end-to-end tests of real deployment patterns: orchestrated pipelines, one pair per
+  producer, worker pools, two-stage pipelines, request/response loops, threaded producers,
+  threads and processes sharing a receiver, backpressure, mixed real-world payloads,
+  recycled and crashed consumers, crashed producers, idle and interrupted consumers, many
+  pairs under a tight descriptor limit, a full `/dev/shm`, and `ProcessPoolExecutor`
+  workers. They wait on events instead of sleeps, and the single-process tests alone
+  cover every line.
+- Document how long to keep endpoints referenced, how pairs behave when processes crash,
+  timeouts, and file-descriptor use.
+
+Messages now carry a block identity that earlier versions cannot read, so both endpoints of
+a pair must run 4.3.0. Processes started from one installation always do; restart a
+long-running service after upgrading instead of letting it spawn workers that import the
+new version.
+
 ## 4.2.2
 
 - Fix producers of different pairs rejecting each other with "A shared-memory pair
