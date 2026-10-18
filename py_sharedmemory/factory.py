@@ -43,6 +43,8 @@ def create_shared_memory_pair(
         ack_queue = context.Queue()
         cleanup.callback(ack_queue.close)
         sender = SharedMemorySender(capacity, data_queue, ack_queue, owner_lock=owner_lock)
-        receiver = SharedMemoryReceiver(data_queue, ack_queue, owner_lock=owner_lock)
+        receiver = SharedMemoryReceiver(
+            data_queue, ack_queue, owner_lock=owner_lock, capacity=capacity
+        )
         cleanup.pop_all()  # The endpoints now own both queues.
     return sender, receiver

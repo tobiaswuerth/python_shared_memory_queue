@@ -11,7 +11,7 @@ from py_sharedmemory import SharedMemorySender
 from py_sharedmemory import sender as sender_module
 from py_sharedmemory.convert import deserialize
 
-from .helpers import LocalQueue, assert_unlinked, block_names, pooled_names
+from .helpers import LocalQueue, assert_unlinked, block_names, forget_mappings, pooled_names
 
 MiB = 2**20
 
@@ -90,6 +90,7 @@ def test_pooled_block_is_reused_only_when_it_fits(make_pair, first_size, second_
     # A miss drops the pooled block, so the pool never outgrows capacity.
     assert not sender._pool
     if not reused:
+        forget_mappings(receiver)
         assert_unlinked(first_name)
     np.testing.assert_array_equal(receiver.get(timeout=3), payload)
     assert sender.wait_for_all_ack(timeout=3)
@@ -112,6 +113,7 @@ def test_pool_keeps_only_the_newest_blocks(make_pair, monkeypatch):
     assert [receiver.get(timeout=3) for _ in range(4)] == list(range(4))
     assert sender.wait_for_all_ack(timeout=3)
     assert pooled_names(sender) == names[2:]
+    forget_mappings(receiver)
     for name in names[:2]:
         assert_unlinked(name)
 
@@ -125,6 +127,7 @@ def test_pool_stays_within_its_byte_limit(make_pair, monkeypatch):
     assert [receiver.get(timeout=3) for _ in range(3)] == list(range(3))
     assert sender.wait_for_all_ack(timeout=3)
     assert pooled_names(sender) == names[1:]
+    forget_mappings(receiver)
     assert_unlinked(names[0])
 
 
@@ -192,6 +195,7 @@ def test_close_frees_pooled_blocks(make_pair):
     names = pooled_names(sender)
     sender.close()
     assert not sender._pool
+    forget_mappings(receiver)
     for name in names:
         assert_unlinked(name)
 
@@ -214,6 +218,7 @@ def test_close_reports_pool_cleanup_errors_and_frees_the_rest(make_pair, monkeyp
     with pytest.raises(ExceptionGroup, match="Failed to close"):
         sender.close()
     assert not sender._pool
+    forget_mappings(receiver)
     for name in names:
         assert_unlinked(name)
 

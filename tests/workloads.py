@@ -216,6 +216,42 @@ def idle_consumer(receiver, waiting):
     receiver.get(timeout=60)
 
 
+def interruptible_consumer(receiver, waiting, results):
+    """Wait for a message until Ctrl-C arrives, then report it and exit cleanly."""
+    queue = receiver._data_queue
+    queue._reader = _SignalWhenWaiting(queue._reader, waiting)
+    try:
+        receiver.get(timeout=60)
+    except KeyboardInterrupt:
+        results.put("interrupted")
+
+
+def counting_producer(sender, count, stops):
+    """Send numbered payloads, then one stop signal per consumer."""
+    with sender:
+        for index in range(count):
+            sender.put((index, np.full(2_000, index)), timeout=20)
+        for _ in range(stops):
+            sender.put(None, timeout=20)
+        if not sender.wait_for_all_ack(timeout=20):
+            raise TimeoutError("Messages were not acknowledged")
+
+
+def collect_ids(receiver):
+    """Consume until a stop signal; return the numbers of intact payloads."""
+    handled = []
+    while (message := receiver.get(timeout=20)) is not None:
+        index, payload = message
+        assert (payload == index).all()
+        handled.append(index)
+    return handled
+
+
+def id_worker(receiver, results):
+    with receiver:
+        results.put(collect_ids(receiver))
+
+
 def partial_consumer(receiver, count, results):
     """Take `count` messages, report them, and exit cleanly, like a worker being recycled."""
     with receiver:

@@ -7,11 +7,16 @@ through `receive` or `send`, which fail at once when a child dies instead of han
 
 import gc
 import multiprocessing as mp
+import os
+import shutil
+import signal
+import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import suppress
 from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
 from queue import Empty, Full
 
 import numpy as np
@@ -441,6 +446,170 @@ def test_crashed_producer_leaves_the_consumer_responsive():
         for name in block_names_sent:
             with suppress(FileNotFoundError):
                 release_shared_memory(SharedMemory(name=name))
+
+
+def test_threads_and_processes_consume_one_receiver_together():
+    # The parent consumes with threads while worker processes share the same receiver.
+    sender, receiver = create_shared_memory_pair(8, ctx=SPAWN)
+    results = SPAWN.Queue()
+    producer = SPAWN.Process(target=workloads.counting_producer, args=(sender, 400, 4))
+    workers = [
+        SPAWN.Process(target=workloads.id_worker, args=(receiver, results)) for _ in range(2)
+    ]
+    for process in [producer, *workers]:
+        process.start()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            threads = [pool.submit(workloads.collect_ids, receiver) for _ in range(2)]
+            by_threads = [index for future in threads for index in future.result(timeout=60)]
+        by_processes = [
+            index for _ in workers for index in receive(results, [producer, *workers], 30)
+        ]
+    finally:
+        stop([producer, *workers])
+        receiver.close()
+        close_queues(results)
+    assert sorted(by_threads + by_processes) == list(range(400))
+    assert all(process.exitcode == 0 for process in [producer, *workers])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGINT cannot target one child on Windows")
+def test_ctrl_c_in_a_waiting_consumer_leaves_the_pair_usable():
+    sender, receiver = create_shared_memory_pair(0, ctx=SPAWN)
+    waiting, results = SPAWN.Event(), SPAWN.Queue()
+    interrupted = SPAWN.Process(
+        target=workloads.interruptible_consumer, args=(receiver, waiting, results)
+    )
+    interrupted.start()
+    survivor = None
+    try:
+        assert waiting.wait(30)
+        os.kill(interrupted.pid, signal.SIGINT)
+        assert receive(results, [interrupted], 15) == "interrupted"
+        stop([interrupted])
+        survivor = SPAWN.Process(target=workloads.partial_consumer, args=(receiver, 5, results))
+        survivor.start()
+        with sender:
+            for index in range(5):
+                sender.put(index, timeout=20)
+            assert receive(results, [survivor], 15) == list(range(5))
+            assert sender.wait_for_all_ack(timeout=20)
+    finally:
+        stop([interrupted] + ([survivor] if survivor else []))
+        receiver.close()
+        close_queues(results)
+    assert interrupted.exitcode == 0
+
+
+MANY_PAIRS = """
+import os
+import resource
+
+import numpy as np
+
+from py_sharedmemory import create_shared_memory_pair
+
+
+def open_descriptors():
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(directory):
+            return len(os.listdir(directory))
+    raise SystemExit("Cannot count descriptors")
+
+
+def round_trip(sender, receiver):
+    for index in range(2):  # Two in flight, so each sender pools two blocks
+        sender.put(np.full(20_000, index), timeout=5)
+    assert [int(receiver.get(timeout=5)[0]) for _ in range(2)] == [0, 1]
+    assert sender.wait_for_all_ack(timeout=5)
+
+
+pairs = [create_shared_memory_pair(2)]
+round_trip(*pairs[0])  # Starts the resource tracker and the queue machinery
+# Each further pair may use 4 descriptors for its two pipes, 1 per block its sender keeps
+# for reuse and 1 per block its receiver keeps mapped: at most capacity (2) of each.
+budget = 40 * (4 + 2 + 2) + 16
+_, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, open_descriptors() + budget), hard))
+for _ in range(40):
+    pair = create_shared_memory_pair(2)
+    round_trip(*pair)
+    pairs.append(pair)
+for sender, receiver in pairs:
+    sender.close()
+    receiver.close()
+print("40 more pairs within", budget, "descriptors")
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-descriptor limits")
+def test_one_process_serves_many_pairs_within_a_tight_descriptor_limit(tmp_path):
+    # A server that streams to many clients holds many pairs at once; macOS allows only
+    # 256 open files by default, so every descriptor a pair keeps counts.
+    script = tmp_path / "many_pairs.py"
+    script.write_text(MANY_PAIRS, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "40 more pairs within" in result.stdout
+
+
+FULL_DEV_SHM = """
+import errno
+
+import numpy as np
+
+from py_sharedmemory import create_shared_memory_pair
+
+sender, receiver = create_shared_memory_pair(2)
+try:
+    sender.put(np.zeros(32 * 2**20, dtype=np.uint8), timeout=5)
+except OSError as error:
+    assert error.errno == errno.ENOSPC, error
+else:
+    raise SystemExit("A 32 MiB message fit into a 16 MiB /dev/shm")
+sender.put("small", timeout=5)  # The pair stays usable
+assert receiver.get(timeout=5) == "small"
+assert sender.wait_for_all_ack(timeout=5)
+sender.close()
+receiver.close()
+print("ENOSPC raised; pair still usable")
+"""
+
+
+def _can_mount_private_dev_shm():
+    if not sys.platform.startswith("linux") or shutil.which("unshare") is None:
+        return False
+    probe = ["unshare", "--user", "--map-root-user", "--mount", "true"]
+    return subprocess.run(probe, capture_output=True, check=False).returncode == 0
+
+
+@pytest.mark.skipif(
+    not _can_mount_private_dev_shm(), reason="Needs Linux user namespaces to shrink /dev/shm"
+)
+def test_full_dev_shm_raises_instead_of_killing_the_producer(tmp_path):
+    # Containers get a small /dev/shm (64 MiB in Docker). Emulate a 16 MiB one and send
+    # 32 MiB: without reserving pages, the producer dies with SIGBUS on the first write.
+    script = tmp_path / "full_dev_shm.py"
+    script.write_text(FULL_DEV_SHM, encoding="utf-8")
+    command = 'mount -t tmpfs -o size=16m tmpfs /dev/shm && exec "$0" "$1"'
+    namespace = ["unshare", "--user", "--map-root-user", "--mount", "sh", "-c", command]
+    result = subprocess.run(
+        [*namespace, sys.executable, str(script)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ENOSPC raised; pair still usable" in result.stdout
 
 
 def test_process_pool_executor_workers_take_tasks_from_a_receiver():

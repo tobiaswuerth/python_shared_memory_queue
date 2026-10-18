@@ -1,7 +1,9 @@
 """Serialize protocol-5 pickle data through a single shared-memory block."""
 
 import errno
+import os
 import pickle
+import secrets
 import sys
 from collections.abc import Callable
 from contextlib import suppress
@@ -12,12 +14,24 @@ from typing import Any, NamedTuple, cast
 # warnings when a receiver does not share the sender's resource tracker.
 _ATTACH_OPTIONS: dict[str, Any] = {"track": False} if sys.version_info >= (3, 13) else {}
 
+# Linux allocates a block's pages on first write, and a full /dev/shm (64 MiB by default in
+# Docker) then kills the writing process with SIGBUS. Reserving them when the block is
+# created turns that into an OSError (ENOSPC) that put() can raise.
+_RESERVE_PAGES = sys.platform.startswith("linux")
+_RESERVATION_UNSUPPORTED = {errno.EOPNOTSUPP, errno.EINVAL, errno.ENOSYS}
+
+# POSIX SharedMemory keeps a descriptor next to its mapping; Windows keeps none.
+_CLOSE_SPARE_DESCRIPTOR = os.name != "nt"
+
 
 class SharedMemoryMessage(NamedTuple):
     name: str
     buffer_sizes: tuple[int, ...]
     # Unique per sender. Blocks are reused, so acknowledgements name the message, not the block.
     sequence: int = 0
+    # Random identity of a block the sender will reuse, or 0. Freed POSIX names can be taken
+    # by new blocks, so receivers key their kept mappings by name and identity.
+    block: int = 0
 
     @property
     def size(self) -> int:
@@ -25,7 +39,37 @@ class SharedMemoryMessage(NamedTuple):
 
 
 def create_shared_memory(size: int) -> SharedMemory:
-    return SharedMemory(create=True, size=size)
+    """Create a block, reserving its pages and dropping its spare descriptor where possible."""
+    allocation = SharedMemory(create=True, size=size)
+    block: Any = allocation  # Its descriptor is private
+    try:
+        if _RESERVE_PAGES:
+            _reserve_pages(block._fd, size)
+    except BaseException:
+        release_shared_memory(allocation)
+        raise
+    drop_spare_descriptor(allocation)
+    block._block_token = 1 + secrets.randbits(63)
+    return allocation
+
+
+def drop_spare_descriptor(allocation: SharedMemory) -> None:
+    """Close POSIX SharedMemory's own descriptor; its mapping holds a duplicate.
+
+    Keeping both would cost every block kept mapped two of the process's descriptors.
+    """
+    if _CLOSE_SPARE_DESCRIPTOR:
+        block: Any = allocation
+        os.close(block._fd)
+        block._fd = -1
+
+
+def _reserve_pages(descriptor: int, size: int) -> None:
+    try:
+        cast(Any, os).posix_fallocate(descriptor, 0, size)  # Linux-only, unlike its stubs' os
+    except OSError as error:
+        if error.errno not in _RESERVATION_UNSUPPORTED:
+            raise  # Above all ENOSPC: /dev/shm cannot hold the block
 
 
 def release_shared_memory(allocation: SharedMemory) -> None:
@@ -75,7 +119,8 @@ def serialize(
         for view in (*chunks, *buffers):
             shared[offset : offset + view.nbytes] = view
             offset += view.nbytes
-        return allocation, SharedMemoryMessage(allocation.name, buffer_sizes, sequence)
+        token = getattr(allocation, "_block_token", 0)
+        return allocation, SharedMemoryMessage(allocation.name, buffer_sizes, sequence, token)
     except BaseException:
         if allocation is not None:
             release_shared_memory(allocation)
@@ -87,12 +132,16 @@ def serialize(
 
 def deserialize(message: SharedMemoryMessage) -> Any:
     """Unpickle with owned local buffers and always close the shared mapping."""
-    return load(message, attach(message))
+    allocation = attach(message)
+    try:
+        return load(message, allocation)
+    finally:
+        allocation.close()
 
 
 def attach(message: SharedMemoryMessage) -> SharedMemory:
     """Map the block that valid metadata names, or explain why it no longer exists."""
-    _validate_message(message)
+    validate_message(message)
     try:
         allocation = SharedMemory(name=message.name, **_ATTACH_OPTIONS)
     except FileNotFoundError as error:
@@ -115,27 +164,24 @@ def _freed_block_error(message: SharedMemoryMessage) -> FileNotFoundError:
 
 
 def load(message: SharedMemoryMessage, allocation: SharedMemory) -> Any:
-    """Unpickle an attached block with owned local buffers, then close the mapping."""
-    try:
-        if message.size > allocation.size:
-            raise ValueError("Shared-memory block is smaller than its metadata")
-        shared = cast(memoryview, allocation.buf)
-        pickle_size = message.buffer_sizes[0]
-        buffers = _copy_buffers(shared, pickle_size, message.buffer_sizes[1:])
-        with shared[:pickle_size] as pickle_data:
-            return pickle.loads(pickle_data, buffers=buffers)
-    finally:
-        allocation.close()
+    """Unpickle an attached block with owned local buffers; the caller keeps the mapping."""
+    if message.size > allocation.size:
+        raise ValueError("Shared-memory block is smaller than its metadata")
+    shared = cast(memoryview, allocation.buf)
+    pickle_size = message.buffer_sizes[0]
+    buffers = _copy_buffers(shared, pickle_size, message.buffer_sizes[1:])
+    with shared[:pickle_size] as pickle_data:
+        return pickle.loads(pickle_data, buffers=buffers)
 
 
-def _validate_message(message: SharedMemoryMessage) -> None:
+def validate_message(message: SharedMemoryMessage) -> None:
+    """Reject metadata that is malformed before any of it is used."""
     if not isinstance(message, SharedMemoryMessage) or not isinstance(message.name, str):
         raise ValueError("Invalid shared-memory metadata")
     sizes = message.buffer_sizes
     if (
         not message.name
-        or type(message.sequence) is not int
-        or message.sequence < 0
+        or any(type(field) is not int or field < 0 for field in (message.sequence, message.block))
         or not isinstance(sizes, tuple)
         or not sizes
         or any(type(size) is not int or size < 0 for size in sizes)

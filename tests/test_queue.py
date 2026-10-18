@@ -1,4 +1,5 @@
 import errno
+import math
 import multiprocessing as mp
 import os
 import pickle
@@ -18,7 +19,7 @@ from py_sharedmemory import SharedMemoryReceiver, SharedMemorySender, create_sha
 from py_sharedmemory import sender as sender_module
 from py_sharedmemory.convert import release_shared_memory, serialize
 
-from .helpers import LocalQueue, assert_unlinked, block_names, pooled_names
+from .helpers import LocalQueue, assert_unlinked, block_names, forget_mappings, pooled_names
 
 
 @pytest.mark.parametrize("capacity", [-10, -1, 1.5, "1", True, False])
@@ -112,6 +113,32 @@ def test_outstanding_messages_never_exceed_the_metadata_queue_limit(
     sender.put(3, timeout=3)
     assert [receiver.get(timeout=3) for _ in range(2)] == [2, 3]
     assert sender.wait_for_all_ack(timeout=3)
+
+
+def test_infinite_timeouts_wait_like_none(make_pair):
+    # math.inf is a common way to say "wait forever"; it must not overflow the lock timeouts.
+    sender, receiver = make_pair(1)
+    sender.put("first", timeout=math.inf)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # Full: this put waits until the consumer below frees a slot.
+        blocked_put = pool.submit(sender.put, "second", timeout=math.inf)
+        assert receiver.get(timeout=math.inf) == "first"
+        blocked_put.result(timeout=10)
+        delayed_get = pool.submit(receiver.get, timeout=math.inf)
+        assert delayed_get.result(timeout=10) == "second"
+        assert sender.wait_for_all_ack(timeout=math.inf)
+
+
+@pytest.mark.parametrize("call", ["put", "get", "wait_for_all_ack"])
+def test_nan_timeouts_are_rejected(make_pair, call):
+    sender, receiver = make_pair()
+    calls = {
+        "put": lambda: sender.put(1, timeout=math.nan),
+        "get": lambda: receiver.get(timeout=math.nan),
+        "wait_for_all_ack": lambda: sender.wait_for_all_ack(timeout=math.nan),
+    }
+    with pytest.raises(ValueError, match="NaN"):
+        calls[call]()
 
 
 def test_put_timeout_waits_for_capacity(make_pair):
@@ -220,6 +247,7 @@ def test_failed_put_frees_memory_and_sender_remains_usable(make_pair, monkeypatc
             data = 42
         with pytest.raises(error):
             sender.put(data, timeout=0.2)
+    forget_mappings(receiver)
     for name in names:
         assert_unlinked(name)
     if warm and failure in ("pickle", "allocation", "interrupt"):
@@ -229,6 +257,26 @@ def test_failed_put_frees_memory_and_sender_remains_usable(make_pair, monkeypatc
     sender.put("recovered", timeout=0.2)
     assert receiver.get(timeout=3) == "recovered"
     assert sender.wait_for_all_ack(timeout=3)
+
+
+def test_put_reports_full_shared_memory_and_stays_usable(make_pair, monkeypatch):
+    from py_sharedmemory import convert
+
+    sender, receiver = make_pair()
+
+    def no_space(fd, offset, length):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(convert, "_RESERVE_PAGES", True)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "posix_fallocate", no_space, raising=False)
+        with pytest.raises(OSError, match="No space"):
+            sender.put(np.zeros(100_000, dtype=np.uint8), timeout=1)
+    assert not sender.closed
+    assert sender.wait_for_all_ack(timeout=0)
+    monkeypatch.setattr(convert, "_RESERVE_PAGES", False)
+    sender.put("fits", timeout=1)
+    assert receiver.get(timeout=3) == "fits"
 
 
 def test_failed_decode_is_acknowledged_and_next_message_succeeds(make_pair):
@@ -264,6 +312,7 @@ def test_array_snapshot_is_independent_and_survives_close(make_pair):
     result = receiver.get(timeout=3)
     assert sender.wait_for_all_ack(timeout=3)
     sender.close()
+    forget_mappings(receiver)
     assert_unlinked(name)
     np.testing.assert_array_equal(result, expected)
     result[:] = 7
@@ -531,6 +580,33 @@ def test_get_times_out_while_another_reader_holds_the_read_lock(make_pair):
     assert receiver.get(timeout=3) == 1
 
 
+def test_interrupt_while_reading_releases_the_read_lock(make_pair, monkeypatch):
+    # Ctrl-C can land while the message is being read, with the lock held.
+    sender, receiver = make_pair()
+    sender.put("kept")
+    data_queue = receiver._data_queue
+    assert data_queue._reader.poll(3)
+
+    class InterruptedReader:
+        def __init__(self, reader):
+            self.reader = reader
+
+        def recv_bytes(self):
+            raise KeyboardInterrupt
+
+        def __getattr__(self, name):
+            return getattr(self.reader, name)
+
+    real_reader = data_queue._reader
+    monkeypatch.setattr(data_queue, "_reader", InterruptedReader(real_reader))
+    with pytest.raises(KeyboardInterrupt):
+        receiver.get(timeout=3)
+    assert data_queue._rlock.acquire(block=False)  # Released despite the interrupt
+    data_queue._rlock.release()
+    monkeypatch.setattr(data_queue, "_reader", real_reader)
+    assert receiver.get(timeout=3) == "kept"  # The message was not consumed
+
+
 class RacingReader:
     """Reports one message arriving that another consumer then reads first."""
 
@@ -559,11 +635,38 @@ def test_get_waits_again_when_another_consumer_takes_the_message(make_pair, monk
     assert receiver.get(timeout=3) == "next"
 
 
-def test_get_from_a_queue_closed_in_this_process_fails_like_multiprocessing(make_pair):
+def test_get_after_the_sender_closed_the_queue_in_this_process(make_pair):
     sender, receiver = make_pair()
     sender.close()  # Both endpoints live here, so this closes the shared queue objects
-    with pytest.raises(ValueError, match="is closed"):
+    with pytest.raises(BrokenPipeError, match="closed in this process"):
         receiver.get(timeout=0)
+
+
+def test_put_after_the_receiver_closed_the_queue_in_this_process(make_pair):
+    sender, receiver = make_pair()
+    receiver.close()  # A consumer thread finished and closed the shared queue objects
+    # Either path reports it the same way: the put itself, or the acknowledgement thread
+    # noticing first and closing the sender.
+    with pytest.raises(BrokenPipeError):
+        sender.put("late", timeout=1)
+    assert not sender._blocks
+
+
+class ClosedQueue(LocalQueue):
+    def put_nowait(self, item):
+        raise ValueError("Queue is closed")
+
+
+def test_put_into_a_closed_metadata_queue_raises_broken_pipe():
+    sender = SharedMemorySender(1, ClosedQueue(), LocalQueue())
+    try:
+        with pytest.raises(BrokenPipeError, match="closed in this process") as caught:
+            sender.put("late", timeout=1)
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert not sender._blocks
+        assert sender.wait_for_all_ack(timeout=0)  # Its capacity was released
+    finally:
+        sender.close()
 
 
 def fail_to_open(path):
@@ -665,6 +768,7 @@ def test_cleanup_error_does_not_leave_other_allocations_or_queues_open(make_pair
     assert not sender._ack_thread.is_alive()
     assert sender._data_queue._closed
     assert receiver._ack_queue._closed
+    forget_mappings(receiver)
     for name in names:
         assert_unlinked(name)
 
@@ -704,6 +808,7 @@ def test_drain_waits_until_shared_memory_cleanup_finishes(make_pair, monkeypatch
         finally:
             allow_cleanup.set()
         assert future.result(timeout=3)
+    forget_mappings(receiver)
     assert_unlinked(name)
 
 

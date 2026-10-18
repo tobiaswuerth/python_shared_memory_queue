@@ -28,6 +28,16 @@ def pooled_names(sender):
     return [allocation.name for allocation in sender._pool]
 
 
+def forget_mappings(receiver):
+    """Release a receiver's kept mappings, as closing it would.
+
+    On Windows a block lives while any process maps it, so a receiver in the same process
+    keeps blocks alive that its sender has freed. Call this before `assert_unlinked`.
+    """
+    for cache in list(receiver._caches):
+        cache.close()
+
+
 def assert_unlinked(name):
     try:
         handle = sm.SharedMemory(name=name)

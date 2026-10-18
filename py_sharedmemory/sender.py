@@ -16,6 +16,7 @@ from queue import Empty, Full
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
+from ._timeouts import normalize_timeout
 from .convert import SharedMemoryMessage, create_shared_memory, release_shared_memory, serialize
 
 if TYPE_CHECKING:
@@ -114,7 +115,7 @@ class SharedMemorySender:
 
         Raises:
             queue.Full: No capacity became available in time.
-            BrokenPipeError: The sender is closed.
+            BrokenPipeError: The sender, or the pair's queue in this process, is closed.
             RuntimeError: Called from a process other than the producing process.
 
         Serialization errors propagate unchanged, and the sender stays usable.
@@ -141,6 +142,7 @@ class SharedMemorySender:
             BrokenPipeError: The sender is closed, or closes while waiting.
         """
         self._check_process()
+        timeout = normalize_timeout(timeout)
         with self._condition:
             self._ensure_open()
             drained = self._condition.wait_for(
@@ -251,6 +253,7 @@ class SharedMemorySender:
 
     def _reserve_slot(self, block: bool, timeout: float | None) -> int:
         self._check_process()
+        timeout = normalize_timeout(timeout)
         deadline = None
         if block and timeout is not None:
             deadline = time.monotonic() + max(0, timeout)
@@ -296,11 +299,16 @@ class SharedMemorySender:
                 raise
             if allocation.buf is not None:
                 self._mapped_in_flight += 1
+            if allocation.buf is None or allocation.size > _MAX_POOLED_BYTES:
+                # Freed once acknowledged, so receivers should not keep it mapped.
+                message = message._replace(block=0)
             try:
                 self._ensure_open()
                 self._data_queue.put_nowait(message)
-            except BaseException:
+            except BaseException as error:
                 self._discard(message.sequence)
+                if isinstance(error, ValueError):  # Only a closed multiprocessing.Queue
+                    raise BrokenPipeError("The pair's queue was closed in this process") from error
                 raise
 
     def _release_slot(self) -> None:
