@@ -1,0 +1,220 @@
+{
+  "generated_at_utc": "2026-10-18T09:52:48+00:00",
+  "label": "macOS arm64",
+  "py_sharedmemory": "4.2.1",
+  "python": "3.14.8",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "processor": "arm",
+  "start_method": "spawn",
+  "capacity": 2,
+  "payload": "numpy",
+  "numpy": "2.5.4",
+  "repeats": 5,
+  "results": [
+    {
+      "transport": "standard",
+      "size": 1000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 0.392018949918899,
+      "min_mib_per_second": 0.3665019048752005,
+      "max_mib_per_second": 0.45475668432400396,
+      "median_ms_per_message": 2.4327250420000013,
+      "durations_seconds": [
+        2.519230874999991,
+        2.4327250420000013,
+        2.6020992079999985,
+        2.304289208,
+        2.097108958000007
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 1000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 4.451316358617723,
+      "min_mib_per_second": 3.421181047417366,
+      "max_mib_per_second": 5.546012682876894,
+      "median_ms_per_message": 0.21424545899999714,
+      "durations_seconds": [
+        0.1936764590000024,
+        0.21424545899999714,
+        0.27875587500000165,
+        0.23523308299999712,
+        0.17195674999999255
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 10000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 4.008776923208185,
+      "min_mib_per_second": 3.5628050489748295,
+      "max_mib_per_second": 4.3025651251677655,
+      "median_ms_per_message": 2.378965790999999,
+      "durations_seconds": [
+        2.2165250000000043,
+        2.226230292000011,
+        2.6767513329999986,
+        2.4444102500000042,
+        2.378965790999999
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 10000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 43.5448089455446,
+      "min_mib_per_second": 29.526385215522865,
+      "max_mib_per_second": 46.929067090825725,
+      "median_ms_per_message": 0.21900987499999758,
+      "durations_seconds": [
+        0.20643291600001135,
+        0.2032161249999973,
+        0.21900987499999758,
+        0.22049533300000235,
+        0.32299054199999944
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 100000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 40.65065027153891,
+      "min_mib_per_second": 36.92446694754157,
+      "max_mib_per_second": 42.600677528765864,
+      "median_ms_per_message": 2.346024750000012,
+      "durations_seconds": [
+        2.5827707080000124,
+        2.2386364999999984,
+        2.581329083,
+        2.3204357910000084,
+        2.346024750000012
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 100000,
+      "messages": 1000,
+      "status": "ok",
+      "median_mib_per_second": 454.4673287191877,
+      "min_mib_per_second": 440.0764704363951,
+      "max_mib_per_second": 576.7466136126262,
+      "median_ms_per_message": 0.20984441699999934,
+      "durations_seconds": [
+        0.20984441699999934,
+        0.18795479099999568,
+        0.2123728749999998,
+        0.2167065000000008,
+        0.16535412499999325
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 1000000,
+      "messages": 536,
+      "status": "ok",
+      "median_mib_per_second": 393.97094139945386,
+      "min_mib_per_second": 368.45712906180836,
+      "max_mib_per_second": 412.49463306803693,
+      "median_ms_per_message": 2.420671720149287,
+      "durations_seconds": [
+        1.2397765409999977,
+        1.2974800420000179,
+        1.3873240420000172,
+        1.2392147500000021,
+        1.3371472080000046
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 1000000,
+      "messages": 536,
+      "status": "ok",
+      "median_mib_per_second": 3129.063579283822,
+      "min_mib_per_second": 2682.3783056173497,
+      "max_mib_per_second": 3365.9370715033583,
+      "median_ms_per_message": 0.3047794626865736,
+      "durations_seconds": [
+        0.16336179200000345,
+        0.1559315420000047,
+        0.15186541600002101,
+        0.19056575000001885,
+        0.18526412500000333
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 10000000,
+      "messages": 53,
+      "status": "ok",
+      "median_mib_per_second": 1380.7722480836192,
+      "min_mib_per_second": 739.5746608500075,
+      "max_mib_per_second": 1388.8702616055605,
+      "median_ms_per_message": 6.906818396226166,
+      "durations_seconds": [
+        0.6834298339999805,
+        0.3660613749999868,
+        0.3846972090000236,
+        0.3639269999999897,
+        0.3653728330000092
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 10000000,
+      "messages": 53,
+      "status": "ok",
+      "median_mib_per_second": 4812.329487943762,
+      "min_mib_per_second": 4651.78263725225,
+      "max_mib_per_second": 5334.286094436343,
+      "median_ms_per_message": 1.981731132075375,
+      "durations_seconds": [
+        0.10768620800001827,
+        0.09475445800001125,
+        0.10503174999999487,
+        0.09727912500000002,
+        0.10865670799998384
+      ]
+    },
+    {
+      "transport": "standard",
+      "size": 100000000,
+      "messages": 5,
+      "status": "ok",
+      "median_mib_per_second": 1338.4046407987473,
+      "min_mib_per_second": 664.2633919553706,
+      "max_mib_per_second": 1438.9160031191198,
+      "median_ms_per_message": 71.25455839999972,
+      "durations_seconds": [
+        0.717843500000015,
+        0.3313863749999939,
+        0.353785208000005,
+        0.37050466700000584,
+        0.3562727919999986
+      ]
+    },
+    {
+      "transport": "shared",
+      "size": 100000000,
+      "messages": 5,
+      "status": "ok",
+      "median_mib_per_second": 4729.063230136509,
+      "min_mib_per_second": 3888.3741795802175,
+      "max_mib_per_second": 5873.581360754653,
+      "median_ms_per_message": 20.16624160000333,
+      "durations_seconds": [
+        0.10164920799999777,
+        0.08902158399999394,
+        0.12263149999998291,
+        0.10083120800001666,
+        0.08118337499999484
+      ]
+    }
+  ]
+}
