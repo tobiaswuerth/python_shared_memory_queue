@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from multiprocessing.queues import Queue
 from types import TracebackType
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from .convert import SharedMemoryMessage, attach, load
+
+if TYPE_CHECKING:
+    from multiprocessing.sharedctypes import Synchronized
 
 
 class SharedMemoryReceiver:
@@ -17,9 +20,20 @@ class SharedMemoryReceiver:
     so the sender can free its memory.
     """
 
-    def __init__(self, data_queue: Queue[SharedMemoryMessage], ack_queue: Queue[int]) -> None:
+    def __init__(
+        self,
+        data_queue: Queue[SharedMemoryMessage],
+        ack_queue: Queue[int],
+        *,
+        producer_owner: Synchronized[int] | None = None,
+    ) -> None:
         self._data_queue = data_queue
         self._ack_queue = ack_queue
+        # Held only to keep the pair's producer-owner slot allocated while this receiver
+        # lives: the parent usually drops its sender once the producer has started, and a
+        # freed slot would be reused by the next pair's owner, so the producers of two
+        # pairs would reject each other.
+        self._producer_owner = producer_owner
         self._closed = False
 
     @property

@@ -177,7 +177,9 @@ reused or freed and can be modified freely.
 Create the pair in the parent process and pass the endpoints to workers as `Process`
 arguments, the same way as a `multiprocessing.Queue`. Use the same context for the pair
 and the processes. A sender can be passed to another process only **before** its first
-`put`; after that it belongs to the process that used it.
+`put`; after that it belongs to the process that used it. The creating process may drop its
+sender once the producer has started, but should keep the receiver (or the sender) while the
+pair is in use: the pair's queues and its producer-owner slot live with them.
 
 ```python
 ctx = mp.get_context("spawn")  # "fork" and "forkserver" also work

@@ -1,9 +1,12 @@
+import gc
 import multiprocessing as mp
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from py_sharedmemory import create_shared_memory_pair
 
 from .helpers import (
     abandon_metadata,
@@ -157,6 +160,34 @@ def test_abandoned_metadata_does_not_hang_process_exit(make_pair, ctx):
             process.terminate()
             process.join(5)
         result_in.close()
+
+
+def test_producers_whose_senders_the_parent_dropped(ctx):
+    # The documented pattern: create a pair, pass the sender to its process, keep only the
+    # receiver. Process.start() drops its arguments, so the parent's sender is freed. Its
+    # producer-owner slot must stay reserved, or the next pair reuses it and the producers
+    # of the two pairs reject each other as "a second producing process".
+    receivers, processes = [], []
+    try:
+        for _ in range(4):
+            sender, receiver = create_shared_memory_pair(2, ctx=ctx)
+            process = ctx.Process(target=produce, args=(sender, 3))
+            process.start()
+            del sender
+            gc.collect()
+            receivers.append(receiver)
+            processes.append(process)
+        for receiver in receivers:
+            assert [receiver.get(timeout=10)[0] for _ in range(3)] == [0, 1, 2]
+        for process in processes:
+            join_process(process)
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+        for receiver in receivers:
+            receiver.close()
 
 
 def test_a_second_producing_process_is_rejected(make_pair, ctx):

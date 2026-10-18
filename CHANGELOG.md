@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.2.2
+
+- Fix producers of different pairs rejecting each other with "A shared-memory pair
+  supports one producing process". The pair's producer-owner slot lived only as long as
+  the parent's sender, which `Process.start()` releases. Once that sender was freed, the
+  next pair could reuse the slot, so two pairs shared one owner. The receiver now keeps
+  the slot too, so it stays reserved while the creating process holds its receiver, as
+  in the documented pattern.
+
 ## 4.2.1
 
 - `put` copies large `bytes` and `bytearray` objects (64 KiB and up) straight into shared
