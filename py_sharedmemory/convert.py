@@ -60,16 +60,35 @@ def serialize(data: Any) -> tuple[SharedMemory, SharedMemoryMessage]:
 
 def deserialize(message: SharedMemoryMessage) -> Any:
     """Unpickle with owned local buffers and always close the shared mapping."""
+    return load(message, attach(message))
+
+
+def attach(message: SharedMemoryMessage) -> SharedMemory:
+    """Map the block that valid metadata names, or explain why it no longer exists."""
     _validate_message(message)
     try:
         allocation = SharedMemory(name=message.name, **_ATTACH_OPTIONS)
     except FileNotFoundError as error:
-        raise FileNotFoundError(
-            errno.ENOENT,
-            "Shared-memory block was freed before it was received; the sender probably "
-            "closed without calling wait_for_all_ack()",
-            message.name,
-        ) from error
+        raise _freed_block_error(message) from error
+    # Attaching on Windows is not atomic: a name freed in between is recreated as a new,
+    # zero-filled block. Every pickle starts with a nonzero opcode.
+    if cast(memoryview, allocation.buf)[0] == 0:
+        allocation.close()
+        raise _freed_block_error(message)
+    return allocation
+
+
+def _freed_block_error(message: SharedMemoryMessage) -> FileNotFoundError:
+    return FileNotFoundError(
+        errno.ENOENT,
+        "Shared-memory block was freed before it was received; the sender probably "
+        "closed without calling wait_for_all_ack()",
+        message.name,
+    )
+
+
+def load(message: SharedMemoryMessage, allocation: SharedMemory) -> Any:
+    """Unpickle an attached block with owned local buffers, then close the mapping."""
     try:
         if message.size > allocation.size:
             raise ValueError("Shared-memory block is smaller than its metadata")

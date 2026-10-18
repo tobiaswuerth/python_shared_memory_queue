@@ -1,3 +1,4 @@
+import errno
 import multiprocessing as mp
 import os
 import pickle
@@ -484,6 +485,82 @@ def test_receiver_closes_ack_feeder_even_if_data_queue_close_fails(monkeypatch):
         receiver.close()
     finally:
         release_shared_memory(allocation)
+        ack_queue.close()
+        ack_queue.join_thread()
+
+
+def fail_to_open(path):
+    raise FileNotFoundError(errno.ENOENT, "Missing input file", path)
+
+
+class OpensFileOnLoad:
+    def __reduce__(self):
+        return fail_to_open, ("missing.txt",)
+
+
+def test_freed_block_is_not_acknowledged():
+    # The sender already freed the block; nothing is left for it to release.
+    allocation, message = serialize(42)
+    release_shared_memory(allocation)
+    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
+    data_queue.put_nowait(message)
+    with pytest.raises(FileNotFoundError, match="freed before it was received"):
+        receiver.get_nowait()
+    assert ack_queue.empty()
+
+
+def test_block_recreated_empty_while_attaching_is_not_acknowledged():
+    # On Windows, attaching to a name freed mid-attach creates a new zero-filled block.
+    allocation, message = serialize(42)
+    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
+    try:
+        allocation.buf[0] = 0
+        data_queue.put_nowait(message)
+        with pytest.raises(FileNotFoundError, match="freed before it was received"):
+            receiver.get_nowait()
+        assert ack_queue.empty()
+    finally:
+        release_shared_memory(allocation)
+
+
+def test_file_not_found_while_unpickling_is_still_acknowledged():
+    allocation, message = serialize(OpensFileOnLoad())
+    data_queue, ack_queue = LocalQueue(), LocalQueue()
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
+    try:
+        data_queue.put_nowait(message)
+        with pytest.raises(FileNotFoundError, match="Missing input file"):
+            receiver.get_nowait()
+        assert ack_queue.get_nowait() == message.name
+    finally:
+        release_shared_memory(allocation)
+
+
+def test_many_freed_messages_do_not_block_receiver_close():
+    # Regression: acknowledging freed blocks filled the acknowledgement pipe, which the closed
+    # sender no longer read, so close() waited forever for the queue feeder to flush it.
+    allocation, message = serialize(42)
+    release_shared_memory(allocation)
+    data_queue = LocalQueue()
+    ack_queue = mp.get_context("spawn").Queue()
+    receiver = SharedMemoryReceiver(data_queue, ack_queue)
+    try:
+        for _ in range(5_000):
+            data_queue.put_nowait(message)
+            with pytest.raises(FileNotFoundError):
+                receiver.get_nowait()
+        closer = threading.Thread(target=receiver.close, daemon=True)
+        closer.start()
+        closer.join(10)
+        assert not closer.is_alive(), "Receiver close blocked on unread acknowledgements"
+    finally:
+        # Drain the pipe so a failure cannot leave a blocked feeder thread behind. The feeder
+        # closes the reader once it has flushed everything.
+        with suppress(OSError):
+            while ack_queue._reader.poll(0.1):
+                ack_queue._reader.recv_bytes()
         ack_queue.close()
         ack_queue.join_thread()
 

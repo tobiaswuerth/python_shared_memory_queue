@@ -251,6 +251,27 @@ def test_freed_block_reports_a_clear_error():
     assert isinstance(caught.value.__cause__, FileNotFoundError)
 
 
+def test_zero_filled_block_counts_as_freed(monkeypatch):
+    # Windows recreates a name freed mid-attach as an empty block; a pickle never starts at 0.
+    handle, info = serialize(42)
+    attached = []
+
+    def attach(**kwargs):
+        mapping = SharedMemory(**kwargs)
+        attached.append(mapping)
+        return mapping
+
+    monkeypatch.setattr(convert, "SharedMemory", attach)
+    try:
+        handle.buf[0] = 0
+        with pytest.raises(FileNotFoundError, match="freed before it was received") as caught:
+            deserialize(info)
+        assert caught.value.filename == info.name
+        assert attached[0].buf is None
+    finally:
+        release_shared_memory(handle)
+
+
 def test_cleanup_ignores_names_that_are_already_gone():
     # Windows never raises here because unlink is a no-op, so simulate POSIX.
     handle = Mock()
