@@ -502,7 +502,7 @@ def test_ctrl_c_in_a_waiting_consumer_leaves_the_pair_usable():
 
 
 MANY_PAIRS = """
-import os
+import fcntl
 import resource
 
 import numpy as np
@@ -511,10 +511,16 @@ from py_sharedmemory import create_shared_memory_pair
 
 
 def open_descriptors():
-    for directory in ("/proc/self/fd", "/dev/fd"):
-        if os.path.isdir(directory):
-            return len(os.listdir(directory))
-    raise SystemExit("Cannot count descriptors")
+    # Asks the descriptor table itself, so every kind counts, macOS semaphores included.
+    # This script never holds descriptors numbered anywhere near 4096.
+    count = 0
+    for descriptor in range(4096):
+        try:
+            fcntl.fcntl(descriptor, fcntl.F_GETFD)
+        except OSError:
+            continue
+        count += 1
+    return count
 
 
 def round_trip(sender, receiver):
@@ -526,11 +532,18 @@ def round_trip(sender, receiver):
 
 pairs = [create_shared_memory_pair(2)]
 round_trip(*pairs[0])  # Starts the resource tracker and the queue machinery
-# Each further pair may use 4 descriptors for its two pipes, 1 per block its sender keeps
-# for reuse and 1 per block its receiver keeps mapped: at most capacity (2) of each.
-budget = 40 * (4 + 2 + 2) + 16
+# An idle pair's cost depends on the platform: two pipes everywhere, and on macOS also a
+# descriptor per named semaphore. Traffic may add 1 descriptor per block the sender keeps
+# for reuse and 1 per block the receiver keeps mapped: at most capacity (2) of each.
+before = open_descriptors()
+pairs.append(create_shared_memory_pair(2))
+idle_cost = open_descriptors() - before
+budget = 40 * (idle_cost + 2 + 2) + 16
 _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, open_descriptors() + budget), hard))
+limit = open_descriptors() + budget
+if hard != resource.RLIM_INFINITY:
+    limit = min(hard, limit)
+resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
 for _ in range(40):
     pair = create_shared_memory_pair(2)
     round_trip(*pair)
@@ -538,7 +551,7 @@ for _ in range(40):
 for sender, receiver in pairs:
     sender.close()
     receiver.close()
-print("40 more pairs within", budget, "descriptors")
+print(f"An idle pair costs {idle_cost} descriptors; 40 busy pairs fit in {budget}")
 """
 
 
@@ -557,7 +570,8 @@ def test_one_process_serves_many_pairs_within_a_tight_descriptor_limit(tmp_path)
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "40 more pairs within" in result.stdout
+    print(result.stdout.strip())  # Shows each platform's per-pair cost in the CI log
+    assert "40 busy pairs fit in" in result.stdout
 
 
 FULL_DEV_SHM = """
