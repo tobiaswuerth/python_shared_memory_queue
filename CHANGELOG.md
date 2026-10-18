@@ -35,6 +35,11 @@ Fixes:
   receiver that runs out of descriptors releases its kept mappings and retries.
 - When an endpoint in the same process closed the pair, `put` and `get` raise
   `BrokenPipeError` instead of a `ValueError` from inside `multiprocessing`.
+- A process holding both endpoints that closed its receiver first no longer warns at exit
+  on Windows that "the process may crash". Closing the pair cuts off the sender's read of
+  acknowledgements, and the error the sender kept held that unfinished read until exit.
+  `close()` also returns only once the acknowledgement thread has stopped, even when that
+  thread had already closed the sender.
 
 Tests and docs:
 

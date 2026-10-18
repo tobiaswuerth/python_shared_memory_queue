@@ -154,17 +154,39 @@ class SharedMemorySender:
     def close(self) -> None:
         """Free unread messages and reusable blocks, stop acknowledgements, close the queues.
 
-        Idempotent. Unread messages are discarded silently, so drain with
-        `wait_for_all_ack` first. Also runs automatically when the producing process
-        exits normally, warning if that discards messages.
+        Idempotent, and the acknowledgement thread has stopped once it returns. Unread
+        messages are discarded silently, so drain with `wait_for_all_ack` first. Also runs
+        automatically when the producing process exits normally, warning if that discards
+        messages.
         """
         self._check_process()
         errors: list[Exception] = []
         with self._condition:
-            if self._closed:
-                return
-            self._closed = True
-            discarding_messages = self._pending_count > 0
+            already_closed = self._closed
+            if not already_closed:
+                self._closed = True
+                discarding_messages = self._pending_count > 0
+                self._free_all_blocks(errors)
+        # Also when already closed: the acknowledgement thread may have closed the sender
+        # and still be closing the queues.
+        self._join_ack_thread()
+        if already_closed:
+            return
+        for queue in (self._data_queue, self._ack_queue):
+            try:
+                if discarding_messages:
+                    # Unread metadata must not keep the queue feeder alive at exit.
+                    queue.cancel_join_thread()
+                queue.close()
+                if not discarding_messages:
+                    queue.join_thread()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("Failed to close shared-memory sender", errors)
+
+    def _free_all_blocks(self, errors: list[Exception]) -> None:
+        with self._condition:
             for sequence in list(self._blocks):
                 try:
                     self._discard(sequence)
@@ -179,20 +201,9 @@ class SharedMemorySender:
             if self._finalizer is not None:
                 self._finalizer.cancel()
 
+    def _join_ack_thread(self) -> None:
         if self._ack_thread is not None and self._ack_thread is not threading.current_thread():
             self._ack_thread.join(timeout=1)
-        for queue in (self._data_queue, self._ack_queue):
-            try:
-                if discarding_messages:
-                    # Unread metadata must not keep the queue feeder alive at exit.
-                    queue.cancel_join_thread()
-                queue.close()
-                if not discarding_messages:
-                    queue.join_thread()
-            except Exception as error:
-                errors.append(error)
-        if errors:
-            raise ExceptionGroup("Failed to close shared-memory sender", errors)
 
     def __enter__(self) -> Self:
         self._check_process()
@@ -386,6 +397,11 @@ class SharedMemorySender:
             except Empty:
                 continue
             except Exception as error:
+                if isinstance(error, OSError):
+                    # Keep the error but not its frames: on Windows, a read cut off by its
+                    # pipe closing holds an overlapped request there that can no longer be
+                    # cancelled, and must be released now rather than freed at exit.
+                    error.__traceback__ = None
                 with self._condition:
                     self._ack_error = error
                 try:

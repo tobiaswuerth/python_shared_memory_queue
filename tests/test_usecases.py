@@ -501,6 +501,53 @@ def test_ctrl_c_in_a_waiting_consumer_leaves_the_pair_usable():
     assert interrupted.exitcode == 0
 
 
+BOTH_ENDPOINTS = """
+import threading
+
+from py_sharedmemory import create_shared_memory_pair
+
+sender, receiver = create_shared_memory_pair(2)
+received = []
+
+
+def consume():
+    received.extend(receiver.get(timeout=10) for _ in range(20))
+
+
+consumer = threading.Thread(target=consume)
+consumer.start()
+for index in range(20):
+    sender.put(bytes(100_000) + bytes([index]), timeout=10)
+assert sender.wait_for_all_ack(timeout=10)
+consumer.join(10)
+assert [message[-1] for message in received] == list(range(20))
+# Closing the receiver first closes the pair's queues under the sender's acknowledgement
+# thread, which on Windows cuts off its read of the acknowledgement pipe.
+receiver.close()
+sender.close()
+print("closed")
+"""
+
+
+def test_a_process_holding_both_endpoints_shuts_down_cleanly(tmp_path):
+    # A threaded application keeps both endpoints in one process and closes them in either
+    # order. Exiting must not warn: on Windows, an overlapped read still alive at exit is
+    # freed with its I/O pending, which CPython reports may crash the process.
+    script = tmp_path / "both_endpoints.py"
+    script.write_text(BOTH_ENDPOINTS, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "closed"
+    assert result.stderr == ""
+
+
 MANY_PAIRS = """
 import fcntl
 import resource

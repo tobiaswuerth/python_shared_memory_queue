@@ -1,4 +1,5 @@
 import errno
+import gc
 import math
 import multiprocessing as mp
 import os
@@ -6,6 +7,7 @@ import pickle
 import threading
 import time
 import warnings
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from multiprocessing.shared_memory import SharedMemory
@@ -189,6 +191,46 @@ def test_pipe_closed_under_a_waiting_get_reports_a_closed_pair(make_pair, monkey
     monkeypatch.setattr(data_queue, "_reader", ClosingReader(data_queue._reader, close_meanwhile))
     with pytest.raises(BrokenPipeError):
         receiver.get(timeout=1)
+    monkeypatch.undo()
+    receiver._closed = False
+
+
+class PendingRead:
+    """Stands in for a Windows overlapped read that its closed pipe can no longer cancel.
+
+    CPython leaks one released while running, but frees one still alive at interpreter exit
+    with its I/O pending, warning that the process may crash.
+    """
+
+
+class CutOffReader:
+    def __init__(self, reads, on_poll):
+        self.reads = reads
+        self.on_poll = on_poll
+
+    def poll(self, timeout=0.0):
+        read = PendingRead()
+        self.reads.append(weakref.ref(read))
+        self.on_poll()
+        raise OSError(errno.EBADF, "The handle is invalid")
+
+
+def test_pipe_closed_under_a_get_releases_the_cut_off_read(make_pair, monkeypatch):
+    # A consumer thread's get() fails when another endpoint closes the pair; the error may
+    # live on, for example in a Future, but must not keep the read until exit.
+    _, receiver = make_pair()
+    data_queue = receiver._data_queue
+    reads = []
+
+    def close_meanwhile():
+        receiver._closed = True
+
+    monkeypatch.setattr(data_queue, "_reader", CutOffReader(reads, close_meanwhile))
+    with pytest.raises(BrokenPipeError) as caught:
+        receiver.get(timeout=1)
+    gc.collect()
+    assert isinstance(caught.value.__context__, OSError)
+    assert reads[0]() is None
     monkeypatch.undo()
     receiver._closed = False
 
@@ -494,6 +536,62 @@ def test_ack_channel_failure_closes_without_joining_its_own_thread():
         assert isinstance(caught.value.__cause__, EOFError)
     finally:
         sender.close()
+
+
+def test_ack_pipe_closed_in_this_process_keeps_the_error_but_not_the_read():
+    # A process holding both endpoints that closes its receiver first closes the
+    # acknowledgement pipe under the sender's acknowledgement thread.
+    reads = []
+
+    class ClosedAckQueue(LocalQueue):
+        def get(self, **kwargs):
+            read = PendingRead()
+            reads.append(weakref.ref(read))
+            raise OSError(errno.EBADF, "The handle is invalid")
+
+    sender = SharedMemorySender(1, LocalQueue(), ClosedAckQueue())
+    try:
+        with suppress(BrokenPipeError):
+            sender.put(1)
+        sender._ack_thread.join(3)
+        assert not sender._ack_thread.is_alive()
+        with pytest.raises(BrokenPipeError) as caught:
+            sender.wait_for_all_ack(timeout=0.1)
+        assert isinstance(caught.value.__cause__, OSError)
+        gc.collect()
+        assert reads[0]() is None
+    finally:
+        sender.close()
+
+
+def test_close_waits_for_an_ack_thread_that_is_already_closing_the_sender():
+    # After close() returns, no thread of the sender runs, even when the acknowledgement
+    # thread closed the sender first and is still releasing its queues.
+    cleaning_up = threading.Event()
+    finish_cleanup = threading.Event()
+
+    class BrokenAckQueue(LocalQueue):
+        def get(self, **kwargs):
+            raise EOFError("Acknowledgement pipe failed")
+
+        def close(self):
+            cleaning_up.set()
+            assert finish_cleanup.wait(5)
+
+    sender = SharedMemorySender(1, LocalQueue(), BrokenAckQueue())
+    with suppress(BrokenPipeError):
+        sender.put(1)
+    assert cleaning_up.wait(3)
+    assert sender.closed
+    with ThreadPoolExecutor(1) as executor:
+        closing = executor.submit(sender.close)
+        try:
+            with pytest.raises(TimeoutError):
+                closing.result(timeout=0.05)
+        finally:
+            finish_cleanup.set()
+        closing.result(timeout=3)
+    assert not sender._ack_thread.is_alive()
 
 
 def test_unused_sender_can_be_pickled_for_a_child_process():

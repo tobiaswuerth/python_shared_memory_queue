@@ -198,9 +198,15 @@ class SharedMemoryReceiver:
                     queue._sem.release()
                 finally:
                     queue._rlock.release()
-            except OSError:
+            except OSError as error:
                 # The queue feeder closes the pipe once the pair is closed in this process.
-                self._ensure_pair_open()
+                try:
+                    self._ensure_pair_open()
+                except BrokenPipeError:
+                    # On Windows, the frames of a read cut off this way hold an overlapped
+                    # request that can no longer be cancelled; release it now, not at exit.
+                    error.__traceback__ = None
+                    raise
                 raise
             return ForkingPickler.loads(data)
 
