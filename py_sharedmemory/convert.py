@@ -94,10 +94,7 @@ def load(message: SharedMemoryMessage, allocation: SharedMemory) -> Any:
             raise ValueError("Shared-memory block is smaller than its metadata")
         shared = cast(memoryview, allocation.buf)
         pickle_size = message.buffer_sizes[0]
-        buffers: list[memoryview] = []
-        if len(message.buffer_sizes) > 1:
-            with shared[pickle_size : message.size] as shared_buffer:
-                buffers = _copy_buffers(shared_buffer, message.buffer_sizes[1:])
+        buffers = _copy_buffers(shared, pickle_size, message.buffer_sizes[1:])
         with shared[:pickle_size] as pickle_data:
             return pickle.loads(pickle_data, buffers=buffers)
     finally:
@@ -118,12 +115,12 @@ def _validate_message(message: SharedMemoryMessage) -> None:
         raise ValueError("Invalid shared-memory metadata")
 
 
-def _copy_buffers(shared_buffer: memoryview, sizes: tuple[int, ...]) -> list[memoryview]:
-    # One writable copy; each returned view keeps its local storage alive.
+def _copy_buffers(shared: memoryview, offset: int, sizes: tuple[int, ...]) -> list[memoryview]:
+    # A separate writable copy per buffer starts aligned for any dtype and is freed on its own,
+    # so a small array cannot keep a large neighbour alive.
     buffers = []
-    with memoryview(bytearray(shared_buffer)) as local_buffer:
-        offset = 0
-        for size in sizes:
-            buffers.append(local_buffer[offset : offset + size])
-            offset += size
+    for size in sizes:
+        with shared[offset : offset + size] as shared_buffer:
+            buffers.append(memoryview(bytearray(shared_buffer)))
+        offset += size
     return buffers
