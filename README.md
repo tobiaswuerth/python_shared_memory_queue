@@ -24,7 +24,8 @@ images, and simulation states arrive up to 2× faster, and transfers too large f
 - **Bounded memory:** a capacity limit applies backpressure, and received blocks are
   reused for later messages, so shared memory stays within `capacity × message size`.
 - **One producer, many consumers:** consumer processes and threads share one receiver.
-- **Portable:** Linux, macOS, and Windows; `spawn`, `fork`, and `forkserver`; Python 3.11–3.15.
+- **Portable:** Linux, macOS, and Windows on x86-64 and ARM64; `spawn`, `fork`, and
+  `forkserver`; Python 3.11–3.15, including free-threaded 3.14t and 3.15t.
 - **Lightweight:** no dependencies, fully typed (PEP 561), and 100% test coverage.
 
 Built for **machine-learning data pipelines, reinforcement-learning actors and replay
@@ -84,6 +85,11 @@ throughput, which is especially noticeable on Windows.
 
 Prefer `multiprocessing.Queue` for small messages. Below about 100 kB, the fixed cost of
 mapping a shared-memory block for every message outweighs the pipe.
+
+On free-threaded Python (`python3.14t` and later), threads run Python code in parallel.
+If everything your workers use is free-threading safe, threads and `queue.Queue` pass
+objects by reference without any copy. Use processes, and this package, when you need
+process isolation or rely on extensions that re-enable the GIL.
 
 To let several processes read and write **the same** array in place, use
 [`multiprocessing.shared_memory`](https://docs.python.org/3/library/multiprocessing.shared_memory.html)

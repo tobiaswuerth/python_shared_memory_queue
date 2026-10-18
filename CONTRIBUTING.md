@@ -24,7 +24,8 @@ pre-commit run --all-files    # Ruff lint and format, strict mypy, file and sche
 ```
 
 The pre-commit hook runs the same checks on every commit. CI runs the tests on Linux,
-macOS, and Windows with Python 3.11–3.15, and coverage must stay at 100% on each.
+macOS, and Windows with Python 3.11–3.15, on Linux and Windows ARM64 with 3.11 and 3.15,
+and on free-threaded 3.15t, and coverage must stay at 100% on each.
 
 Tests for the `fork` start method only run on Linux and macOS. On Windows, run them
 through WSL before changing process handling.

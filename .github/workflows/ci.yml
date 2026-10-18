@@ -44,6 +44,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        include:
+          # ARM64 Linux and Windows at both ends of the supported range.
+          - { os: ubuntu-24.04-arm, python: "3.11" }
+          - { os: ubuntu-24.04-arm, python: "3.15" }
+          - { os: windows-11-arm, python: "3.11" }
+          - { os: windows-11-arm, python: "3.15" }
+          # Free-threaded build: the endpoints' own threads and locks run without the GIL.
+          - { os: ubuntu-latest, python: "3.15t" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,6 +64,9 @@ jobs:
       - run: python -m pip install -e ".[test]"
       # The coverage gate in pyproject.toml requires 100% on every platform.
       - run: python -m pytest --cov --cov-report=term-missing
+      - name: Check that the GIL stayed disabled
+        if: ${{ endsWith(matrix.python, 't') }}
+        run: python -c "import sys, numpy, py_sharedmemory; assert not sys._is_gil_enabled()"
       - name: Coverage summary
         if: ${{ !cancelled() }}
         shell: bash
