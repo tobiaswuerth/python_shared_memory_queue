@@ -162,8 +162,8 @@ in fresh pages on every `put` at those sizes.
    received message when one fits, otherwise a new one.
 2. Only the block's name, buffer sizes, and a sequence number travel through a
    `multiprocessing.Queue`.
-3. `get()` attaches to the block, copies the data into local memory, unpickles it, and
-   sends an acknowledgement back.
+3. `get()` maps the block, or reuses its mapping from an earlier message, copies the data
+   into local memory, unpickles it, and sends an acknowledgement back.
 4. A background thread in the producer makes the block available for reuse when the
    acknowledgement arrives. `capacity` limits how many messages can be outstanding.
 
@@ -204,6 +204,12 @@ message that fills at least half of it, or for any message that fits a block of 
 1 MiB. The sender keeps at most 8 such blocks and 256 MiB, never more blocks than the
 capacity allows, and frees them on `close()`. Blocks over 256 MiB are freed once received.
 
+Receivers likewise keep the blocks they read mapped instead of mapping them again for
+every message: each receiving thread keeps at most `capacity` (up to 8) blocks and
+256 MiB, and `close()` releases them. On Windows, where a block lives while any process
+maps it, a receiver therefore keeps a block its sender has freed alive until the receiver
+reads other blocks or closes.
+
 ### Timeouts and non-blocking calls
 
 ```python
@@ -219,6 +225,9 @@ try:
 except Empty:
     ...
 ```
+
+`timeout=None` and `timeout=math.inf` both wait without limit. Negative timeouts behave
+like `0`, and a NaN timeout raises `ValueError`.
 
 ### Multiple consumers and threads
 
@@ -282,8 +291,10 @@ message alive.
 | --- | --- |
 | `queue.Full` | `put` found no capacity within `timeout` or with `block=False`. |
 | `queue.Empty` | `get` found no message within `timeout` or with `block=False`. |
-| `BrokenPipeError` | The endpoint is closed, or the producer's acknowledgement channel failed. |
+| `BrokenPipeError` | The endpoint is closed, an endpoint in the same process closed the pair, or the producer's acknowledgement channel failed. |
 | `FileNotFoundError` | `get` received a message that the producer freed by closing before it was read. |
+| `OSError` (`ENOSPC`) | `put` found no room for the message in shared memory, for example a full `/dev/shm` in a container. The sender stays usable. |
+| `ValueError` | A timeout is NaN. |
 | `RuntimeError` | A second process tries to produce, or a used sender is passed to another process. |
 | Pickling errors | The object cannot be pickled or unpickled. Both endpoints stay usable, and failed messages are still released. |
 | `RuntimeWarning` (warning) | A `with sender:` block or the producing process ended normally and discarded unacknowledged messages. |
@@ -322,8 +333,9 @@ for the underlying queues; it defaults to `multiprocessing.get_context()`.
 **Docker and Kubernetes:** on Linux, shared memory lives in `/dev/shm`, which containers
 limit to 64 MB by default. Raise it to at least `capacity × largest message`, for example
 `docker run --shm-size=2g` or `shm_size: 2gb` in Docker Compose. In Kubernetes, mount an
-`emptyDir` volume with `medium: Memory` at `/dev/shm`. Otherwise the producer can fail
-with `OSError: [Errno 28] No space left on device` or crash with `SIGBUS`.
+`emptyDir` volume with `medium: Memory` at `/dev/shm`. Otherwise `put` raises
+`OSError: [Errno 28] No space left on device`. Since 4.3.0 the sender reserves each new
+block's pages up front, so a full `/dev/shm` no longer kills the producer with `SIGBUS`.
 
 **Linux:** outside containers, `/dev/shm` usually defaults to half of physical RAM.
 
@@ -342,9 +354,12 @@ the last handle closes, so nothing can leak after a crash.
 producer closed or exited before this message was read. Call `wait_for_all_ack()` before
 closing the sender; the sender also warns when this happens.
 
-**`OSError: [Errno 24] Too many open files` with many unread messages:** fixed in 4.1.1.
-On Linux and macOS the sender keeps at most 8 blocks mapped for reuse, two file
-descriptors each; other unread messages hold none.
+**`OSError: [Errno 24] Too many open files`:** on Linux and macOS each pair costs a
+process 4 file descriptors for its queues, plus 1 per block the sender keeps for reuse
+and 1 per block a receiving thread keeps mapped, each at most `capacity` (up to 8).
+Unread messages beyond that hold none. Since 4.3.0 a kept block costs one descriptor
+instead of two, and a receiver that runs out releases its kept mappings and retries.
+For many pairs on macOS, whose default limit is 256, raise it with `ulimit -n`.
 
 **`RuntimeError: A shared-memory pair supports one producing process`:** a second
 process called `put`. Create a separate pair for each producer process.

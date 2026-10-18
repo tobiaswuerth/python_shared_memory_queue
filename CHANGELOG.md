@@ -1,6 +1,16 @@
 # Changelog
 
-## 4.2.3
+## 4.3.0
+
+Faster receives:
+
+- Receivers keep their mappings of blocks the sender reuses instead of mapping each
+  message's block again, which faulted in every page anew. Each receiving thread keeps at
+  most `capacity` (up to 8) blocks and 256 MiB mapped, and `close()` releases them.
+  Messages carry a random identity for each reusable block, so a new block that takes a
+  freed name is never read through an old mapping.
+
+Fixes:
 
 - Fix producers of different pairs still rejecting each other when the creating process
   kept neither endpoint, for example an orchestrator that wires producer and consumer
@@ -12,13 +22,27 @@
   supervisor scales a worker pool down, starved every other consumer of the pair forever.
   Receivers now wait for data without holding the queue's cross-process read lock and take
   it only to read a message that has arrived.
+- A full `/dev/shm`, 64 MiB by default in Docker, no longer kills the producer with
+  `SIGBUS`: the sender reserves a new block's pages up front on Linux, so `put` raises
+  `OSError` (`ENOSPC`) and the sender stays usable.
+- `timeout=math.inf` now waits without limit in `put`, `get`, and `wait_for_all_ack`
+  instead of raising `OverflowError`; a NaN timeout raises `ValueError`.
+- A block kept mapped costs one file descriptor instead of two on Linux and macOS, and a
+  receiver that runs out of descriptors releases its kept mappings and retries.
+- When an endpoint in the same process closed the pair, `put` and `get` raise
+  `BrokenPipeError` instead of a `ValueError` from inside `multiprocessing`.
+
+Tests and docs:
+
 - Add end-to-end tests of real deployment patterns: orchestrated pipelines, one pair per
   producer, worker pools, two-stage pipelines, request/response loops, threaded producers,
-  backpressure, mixed real-world payloads, recycled and crashed consumers, crashed
-  producers, idle consumers being killed, and `ProcessPoolExecutor` workers. They wait on
-  events instead of sleeps, and the single-process tests alone cover every line.
-- Document how long to keep endpoints referenced, and how pairs behave when processes
-  crash.
+  threads and processes sharing a receiver, backpressure, mixed real-world payloads,
+  recycled and crashed consumers, crashed producers, idle and interrupted consumers, many
+  pairs under a tight descriptor limit, a full `/dev/shm`, and `ProcessPoolExecutor`
+  workers. They wait on events instead of sleeps, and the single-process tests alone
+  cover every line.
+- Document how long to keep endpoints referenced, how pairs behave when processes crash,
+  timeouts, and file-descriptor use.
 
 ## 4.2.2
 

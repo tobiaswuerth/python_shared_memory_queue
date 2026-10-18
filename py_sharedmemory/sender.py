@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 # handle, so it keeps every unread block mapped.
 _UNMAP_EXCESS_BLOCKS = sys.platform != "win32"
 
-# Each mapped POSIX block holds two file descriptors. Unread blocks beyond this many are
+# Each mapped POSIX block holds a file descriptor. Unread blocks beyond this many are
 # unmapped right after writing, and freed rather than reused once acknowledged.
 _MAX_MAPPED_BLOCKS = 8
 
