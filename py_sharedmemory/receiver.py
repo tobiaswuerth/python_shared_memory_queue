@@ -35,7 +35,7 @@ class SharedMemoryReceiver:
             timeout: Maximum seconds to wait; `None` waits forever.
 
         Returns:
-            The object, which stays valid after the shared memory is freed. Arrays keep
+            The object, which stays valid after the block is reused or freed. Arrays keep
             their original writability.
 
         Raises:

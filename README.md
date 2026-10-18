@@ -20,8 +20,8 @@ images, and simulation states arrive up to 2× faster, and transfers too large f
   `queue.Full`, and `queue.Empty`.
 - **Any picklable object:** NumPy arrays and other buffers use pickle protocol 5
   out-of-band buffers, so they are copied straight into shared memory.
-- **Bounded memory:** a capacity limit applies backpressure, and each shared-memory
-  block is freed once its message is received.
+- **Bounded memory:** a capacity limit applies backpressure, and received blocks are
+  reused for later messages, so shared memory stays within `capacity × message size`.
 - **One producer, many consumers:** consumer processes and threads share one receiver.
 - **Portable:** Linux, macOS, and Windows; `spawn`, `fork`, and `forkserver`; Python 3.11–3.15.
 - **Lightweight:** no dependencies, fully typed (PEP 561), and 100% test coverage.
@@ -81,8 +81,8 @@ arrays, image or video frames, RL rollouts, large `bytes`, or big nested objects
 helps where large `multiprocessing.Queue` transfers cause heavy pipe I/O or uneven
 throughput, which is especially noticeable on Windows.
 
-Prefer `multiprocessing.Queue` for small messages. Below about 100 kB, creating and
-freeing a shared-memory block (about 0.09 ms per message) costs more than the pipe.
+Prefer `multiprocessing.Queue` for small messages. Below about 100 kB, the fixed cost of
+mapping a shared-memory block for every message outweighs the pipe.
 
 To let several processes read and write **the same** array in place, use
 [`multiprocessing.shared_memory`](https://docs.python.org/3/library/multiprocessing.shared_memory.html)
@@ -105,20 +105,24 @@ Core i9-14900K, 191.8 GiB RAM, Windows 11, Python 3.12.10, NumPy 2.5.3, measured
 2026-10-08. Contiguous float32 arrays, `spawn`, capacity 2, median of 5 runs excluding
 startup and warmup; up to 1,000 messages or 512 MiB per run, at least one message.
 1 GB = 10⁹ bytes. See the [raw results](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/benchmarks/results/windows-numpy.json).
-These numbers show transfer speed; I/O load and stability depend on the workload.
+These numbers show transfer speed; I/O load and stability depend on the workload. They
+predate version 4.2, which reuses received blocks and so no longer pays to fault in fresh
+pages on every `put`.
 
 ## How it works
 
 1. `put()` pickles the object with protocol 5. Large buffers, such as NumPy array data,
-   stay out-of-band, and everything is copied into one new shared-memory block.
-2. Only the block's name and buffer sizes travel through a `multiprocessing.Queue`.
+   stay out-of-band, and everything is copied into one shared-memory block: a block from
+   an earlier, received message when one fits, otherwise a new one.
+2. Only the block's name, buffer sizes, and a sequence number travel through a
+   `multiprocessing.Queue`.
 3. `get()` attaches to the block, copies the data into local memory, unpickles it, and
    sends an acknowledgement back.
-4. A background thread in the producer frees the block when the acknowledgement
-   arrives. `capacity` limits how many blocks can be outstanding at once.
+4. A background thread in the producer makes the block available for reuse when the
+   acknowledgement arrives. `capacity` limits how many messages can be outstanding.
 
 Received objects never point into shared memory, so they stay valid after the block is
-freed and can be modified freely.
+reused or freed and can be modified freely.
 
 ## Usage guide
 
@@ -138,9 +142,15 @@ consumer = ctx.Process(target=consume, args=(receiver,))
 
 ### Capacity and backpressure
 
-`capacity` counts messages that were sent but not yet received and freed. When it is
-reached, `put()` blocks, so a fast producer cannot exhaust memory. Shared-memory use is
-at most about `capacity × message size`. `capacity=0` or `None` means unbounded.
+`capacity` counts messages that were sent but not yet received. When it is reached,
+`put()` blocks, so a fast producer cannot exhaust memory. Shared-memory use is at most
+about `capacity × message size`. `capacity=0` or `None` means unbounded.
+
+Received blocks are reused rather than freed, because writing into memory that is
+already mapped is much faster than faulting in fresh pages. A block is reused for a
+message that fills at least half of it, or for any message that fits a block of up to
+1 MiB. The sender keeps at most 8 such blocks and 256 MiB, never more blocks than the
+capacity allows, and frees them on `close()`. Blocks over 256 MiB are freed once received.
 
 ### Timeouts and non-blocking calls
 
@@ -191,7 +201,9 @@ such as `None` is a simple way to tell consumers that the stream has ended.
 Arrays keep their dtype, shape, and writability. Read-only arrays stay read-only, and
 writable ones arrive as writable local copies. C- and Fortran-contiguous arrays keep
 their layout and are copied straight into shared memory without an intermediate pickle
-copy; other views, such as strided slices, arrive as contiguous copies.
+copy; other views, such as strided slices, arrive as contiguous copies. Each received
+array has its own aligned memory, so keeping one array does not keep the rest of the
+message alive.
 
 ### Errors
 
@@ -200,8 +212,9 @@ copy; other views, such as strided slices, arrive as contiguous copies.
 | `queue.Full` | `put` found no capacity within `timeout` or with `block=False`. |
 | `queue.Empty` | `get` found no message within `timeout` or with `block=False`. |
 | `BrokenPipeError` | The endpoint is closed, or the producer's acknowledgement channel failed. |
+| `FileNotFoundError` | `get` received a message that the producer freed by closing before it was read. |
 | `RuntimeError` | A second process tries to produce, or a used sender is passed to another process. |
-| Pickling errors | The object cannot be pickled or unpickled. Both endpoints stay usable, and failed messages are still freed. |
+| Pickling errors | The object cannot be pickled or unpickled. Both endpoints stay usable, and failed messages are still released. |
 | `RuntimeWarning` (warning) | A `with sender:` block or the producing process ended normally and discarded unacknowledged messages. |
 
 ## API reference
@@ -216,10 +229,10 @@ for the underlying queues; it defaults to `multiprocessing.get_context()`.
 
 | Member | Description |
 | --- | --- |
-| `put(obj, block=True, timeout=None)` | Copy `obj` into a new shared-memory block and send it. |
+| `put(obj, block=True, timeout=None)` | Copy `obj` into a shared-memory block and send it. |
 | `put_nowait(obj)` | `put(obj, block=False)`. |
-| `wait_for_all_ack(timeout=None) -> bool` | Wait until every message is received and freed; `False` on timeout. |
-| `close()` | Free unread messages silently and release resources. Runs automatically at normal process exit. |
+| `wait_for_all_ack(timeout=None) -> bool` | Wait until every message is received and its block released; `False` on timeout. |
+| `close()` | Free unread messages and reusable blocks silently and release resources. Runs automatically at normal process exit. |
 | `closed` | Whether the sender is closed. |
 | `with sender:` | Closes the sender on exit; warns if a clean exit discards unacknowledged messages. |
 
@@ -258,8 +271,9 @@ the last handle closes, so nothing can leak after a crash.
 producer closed or exited before this message was read. Call `wait_for_all_ack()` before
 closing the sender; the sender also warns when this happens.
 
-**`OSError: [Errno 24] Too many open files` with many unread messages:** fixed in 4.1.1,
-where unread messages no longer hold file descriptors.
+**`OSError: [Errno 24] Too many open files` with many unread messages:** fixed in 4.1.1.
+On Linux and macOS the sender keeps at most 8 blocks mapped for reuse, two file
+descriptors each; other unread messages hold none.
 
 **`RuntimeError: A shared-memory pair supports one producing process`:** a second
 process called `put`. Create a separate pair for each producer process.
