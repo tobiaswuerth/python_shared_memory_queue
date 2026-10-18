@@ -3,6 +3,7 @@
 import errno
 import pickle
 import sys
+from collections.abc import Callable
 from contextlib import suppress
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, NamedTuple, cast
@@ -15,10 +16,16 @@ _ATTACH_OPTIONS: dict[str, Any] = {"track": False} if sys.version_info >= (3, 13
 class SharedMemoryMessage(NamedTuple):
     name: str
     buffer_sizes: tuple[int, ...]
+    # Unique per sender. Blocks are reused, so acknowledgements name the message, not the block.
+    sequence: int = 0
 
     @property
     def size(self) -> int:
         return sum(self.buffer_sizes)
+
+
+def create_shared_memory(size: int) -> SharedMemory:
+    return SharedMemory(create=True, size=size)
 
 
 def release_shared_memory(allocation: SharedMemory) -> None:
@@ -30,8 +37,15 @@ def release_shared_memory(allocation: SharedMemory) -> None:
             allocation.unlink()
 
 
-def serialize(data: Any) -> tuple[SharedMemory, SharedMemoryMessage]:
-    """Copy a pickle and its out-of-band buffers into owned shared memory."""
+def serialize(
+    data: Any,
+    sequence: int = 0,
+    allocate: Callable[[int], SharedMemory] = create_shared_memory,
+) -> tuple[SharedMemory, SharedMemoryMessage]:
+    """Copy a pickle and its out-of-band buffers into an owned block of at least that size.
+
+    `allocate` returns a new or reused block; this function frees it if copying fails.
+    """
     buffers: list[memoryview] = []
     allocation = None
 
@@ -41,14 +55,14 @@ def serialize(data: Any) -> tuple[SharedMemory, SharedMemoryMessage]:
     try:
         pickle_data = pickle.dumps(data, protocol=5, buffer_callback=append_buffer)
         buffer_sizes = (len(pickle_data), *(buffer.nbytes for buffer in buffers))
-        allocation = SharedMemory(create=True, size=sum(buffer_sizes))
+        allocation = allocate(sum(buffer_sizes))
         shared = cast(memoryview, allocation.buf)
         shared[: len(pickle_data)] = pickle_data
         offset = len(pickle_data)
         for buffer in buffers:
             shared[offset : offset + buffer.nbytes] = buffer
             offset += buffer.nbytes
-        return allocation, SharedMemoryMessage(allocation.name, buffer_sizes)
+        return allocation, SharedMemoryMessage(allocation.name, buffer_sizes, sequence)
     except BaseException:
         if allocation is not None:
             release_shared_memory(allocation)
@@ -107,6 +121,8 @@ def _validate_message(message: SharedMemoryMessage) -> None:
     sizes = message.buffer_sizes
     if (
         not message.name
+        or type(message.sequence) is not int
+        or message.sequence < 0
         or not isinstance(sizes, tuple)
         or not sizes
         or any(type(size) is not int or size < 0 for size in sizes)

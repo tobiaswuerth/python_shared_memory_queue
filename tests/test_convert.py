@@ -219,6 +219,10 @@ def test_copy_failure_unlinks_new_allocation(monkeypatch):
         SharedMemoryMessage("unused", (True,)),
         SharedMemoryMessage("unused", (1.0,)),
         SharedMemoryMessage("unused", [1]),
+        SharedMemoryMessage("unused", (1,), -1),
+        SharedMemoryMessage("unused", (1,), True),
+        SharedMemoryMessage("unused", (1,), 1.0),
+        SharedMemoryMessage("unused", (1,), None),
     ],
 )
 def test_invalid_metadata_is_rejected_before_attaching(bad_info, monkeypatch):

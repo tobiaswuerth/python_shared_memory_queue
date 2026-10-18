@@ -29,6 +29,8 @@ def make_pair():
         sender.close()
         receiver.close()
         assert not sender._blocks
+        assert not sender._pool
+        assert sender._mapped_in_flight == 0
         assert sender._ack_thread is None or not sender._ack_thread.is_alive()
 
 

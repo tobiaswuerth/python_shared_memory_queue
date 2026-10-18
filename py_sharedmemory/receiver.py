@@ -17,7 +17,7 @@ class SharedMemoryReceiver:
     so the sender can free its memory.
     """
 
-    def __init__(self, data_queue: Queue[SharedMemoryMessage], ack_queue: Queue[str]) -> None:
+    def __init__(self, data_queue: Queue[SharedMemoryMessage], ack_queue: Queue[int]) -> None:
         self._data_queue = data_queue
         self._ack_queue = ack_queue
         self._closed = False
@@ -54,7 +54,7 @@ class SharedMemoryReceiver:
             return load(message, allocation)
         finally:
             # Failed decoding must still release the sender's memory and capacity.
-            self._ack_queue.put_nowait(message.name)
+            self._ack_queue.put_nowait(message.sequence)
 
     def get_nowait(self) -> Any:
         """Equivalent to `get(block=False)`."""

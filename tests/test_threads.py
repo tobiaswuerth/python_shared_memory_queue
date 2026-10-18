@@ -39,11 +39,11 @@ def test_capacity_includes_puts_still_serializing(make_pair, monkeypatch):
     release = threading.Event()
     real_convert = sender_module.serialize
 
-    def slow_convert(data):
+    def slow_convert(*args, **kwargs):
         started.set()
         if not release.wait(3):
             raise TimeoutError("Test did not release serialization")
-        return real_convert(data)
+        return real_convert(*args, **kwargs)
 
     monkeypatch.setattr(sender_module, "serialize", slow_convert)
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -67,11 +67,11 @@ def test_close_during_serialization_frees_the_late_allocation(make_pair, monkeyp
     names = []
     real_convert = sender_module.serialize
 
-    def slow_convert(data):
+    def slow_convert(*args, **kwargs):
         started.set()
         if not release.wait(3):
             raise TimeoutError("Test did not release serialization")
-        handle, info = real_convert(data)
+        handle, info = real_convert(*args, **kwargs)
         names.append(handle.name)
         return handle, info
 

@@ -18,6 +18,16 @@ class LocalQueue(Queue):
         pass
 
 
+def block_names(sender):
+    """Names of the sender's unacknowledged blocks, oldest first."""
+    return [allocation.name for allocation in sender._blocks.values()]
+
+
+def pooled_names(sender):
+    """Names of the acknowledged blocks the sender keeps for reuse, oldest first."""
+    return [allocation.name for allocation in sender._pool]
+
+
 def assert_unlinked(name):
     try:
         handle = sm.SharedMemory(name=name)
@@ -93,7 +103,7 @@ def abandon_metadata(sender, result_pipe):
         with sender:
             for _ in range(1_000):
                 sender.put(b"x")
-            result_pipe.send(list(sender._blocks))
+            result_pipe.send(block_names(sender))
             result_pipe.close()
 
     with pytest.warns(RuntimeWarning, match="discards 1000 unacknowledged"):
