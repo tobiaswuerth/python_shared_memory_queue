@@ -48,6 +48,11 @@ Tests and docs:
 - Document how long to keep endpoints referenced, how pairs behave when processes crash,
   timeouts, and file-descriptor use.
 
+Messages now carry a block identity that earlier versions cannot read, so both endpoints of
+a pair must run 4.3.0. Processes started from one installation always do; restart a
+long-running service after upgrading instead of letting it spawn workers that import the
+new version.
+
 ## 4.2.2
 
 - Fix producers of different pairs rejecting each other with "A shared-memory pair
