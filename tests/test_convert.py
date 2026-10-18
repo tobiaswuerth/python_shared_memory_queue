@@ -1,5 +1,6 @@
 import pickle
 import sys
+import tracemalloc
 from multiprocessing.shared_memory import SharedMemory
 from unittest.mock import Mock
 
@@ -155,24 +156,104 @@ def test_protocol_5_buffer_mutability_and_empty_buffers(payload):
         assert payload[0] != 0
 
 
-def test_pickle_failure_releases_exported_views():
-    payload = bytearray(b"data")
+MiB = 2**20
+# Pickle hands bytes-like objects from 64 KiB up to its output file by reference.
+LARGE = 2**17
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(lambda: bytes(32 * MiB), id="bytes"),
+        pytest.param(lambda: bytearray(32 * MiB), id="bytearray"),
+        pytest.param(
+            lambda: {"step": 7, "frames": bytearray(32 * MiB), "tags": ["train"] * 100},
+            id="nested",
+        ),
+    ],
+)
+def test_large_bytes_reach_shared_memory_without_an_intermediate_copy(payload):
+    original = payload()
+    tracemalloc.start()
+    try:
+        handle, info = serialize(original)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    try:
+        # pickle.dumps would allocate the whole payload again, and more while growing.
+        assert peak < MiB
+        assert deserialize(info) == original
+    finally:
+        release_shared_memory(handle)
+
+
+class ResizesEarlierPayload:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __reduce__(self):
+        self.payload.extend(b"more")
+        return int, ()
+
+
+def test_bytearray_cannot_be_resized_before_it_is_copied():
+    # A resize after pickle wrote the length header would corrupt the stream.
+    payload = bytearray(LARGE)
+    with pytest.raises(BufferError):
+        serialize([payload, ResizesEarlierPayload(payload)])
+    payload.extend(b"more")
+    assert len(payload) == LARGE + 4
+
+
+@pytest.mark.parametrize(
+    ("payload", "wrap"),
+    [
+        pytest.param(bytearray(b"data"), FailsAfterBuffer, id="out-of-band"),
+        pytest.param(bytearray(LARGE), lambda payload: [payload, Unpicklable()], id="in-band"),
+    ],
+)
+def test_pickle_failure_releases_exported_views(payload, wrap):
     with pytest.raises(ValueError, match="Cannot serialize"):
-        serialize(FailsAfterBuffer(payload))
-    # Resizing would raise BufferError if the raw pickle buffer were retained.
+        serialize(wrap(payload))
+    # Resizing would raise BufferError if a view of the payload were retained.
     payload.extend(b"more")
 
 
-def test_allocation_failure_releases_exported_views(monkeypatch):
-    payload = bytearray(b"data")
-
+@pytest.mark.parametrize(
+    ("payload", "wrap"),
+    [
+        pytest.param(bytearray(b"data"), Buffered, id="out-of-band"),
+        pytest.param(bytearray(LARGE), list, id="in-band"),
+    ],
+)
+def test_allocation_failure_releases_exported_views(monkeypatch, payload, wrap):
     def fail_allocation(**kwargs):
         raise MemoryError("No shared memory")
 
     monkeypatch.setattr(convert, "SharedMemory", fail_allocation)
     with pytest.raises(MemoryError):
-        serialize(Buffered(payload))
+        serialize(wrap(payload))
     payload.extend(b"more")
+
+
+def test_success_releases_exported_views():
+    payload = bytearray(LARGE)
+    handle, info = serialize({"payload": payload})
+    try:
+        payload.extend(b"more")
+        assert deserialize(info) == {"payload": bytearray(LARGE)}
+    finally:
+        release_shared_memory(handle)
+
+
+def test_payload_spanning_many_pickle_frames_round_trips():
+    original = {"numbers": list(range(200_000)), "blob": b"x" * LARGE, "text": "y" * LARGE}
+    handle, info = serialize(original)
+    try:
+        assert deserialize(info) == original
+    finally:
+        release_shared_memory(handle)
 
 
 def test_copy_failure_unlinks_new_allocation(monkeypatch):

@@ -18,8 +18,9 @@ images, and simulation states arrive up to 2× faster, and transfers too large f
 
 - **Familiar API:** `put` / `get` with `block`, `timeout`, `put_nowait` / `get_nowait`,
   `queue.Full`, and `queue.Empty`.
-- **Any picklable object:** NumPy arrays and other buffers use pickle protocol 5
-  out-of-band buffers, so they are copied straight into shared memory.
+- **Any picklable object:** NumPy arrays, other protocol-5 buffers, and large `bytes` and
+  `bytearray` objects are copied straight into shared memory, without an intermediate
+  pickle copy.
 - **Bounded memory:** a capacity limit applies backpressure, and received blocks are
   reused for later messages, so shared memory stays within `capacity × message size`.
 - **One producer, many consumers:** consumer processes and threads share one receiver.
@@ -111,9 +112,10 @@ pages on every `put`.
 
 ## How it works
 
-1. `put()` pickles the object with protocol 5. Large buffers, such as NumPy array data,
-   stay out-of-band, and everything is copied into one shared-memory block: a block from
-   an earlier, received message when one fits, otherwise a new one.
+1. `put()` pickles the object with protocol 5. Large buffers, such as NumPy array data and
+   `bytes` or `bytearray` objects of 64 KiB or more, never enter the pickle; everything is copied once,
+   from the original objects into one shared-memory block: a block from an earlier,
+   received message when one fits, otherwise a new one.
 2. Only the block's name, buffer sizes, and a sequence number travel through a
    `multiprocessing.Queue`.
 3. `get()` attaches to the block, copies the data into local memory, unpickles it, and
