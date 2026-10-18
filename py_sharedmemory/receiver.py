@@ -13,7 +13,7 @@ from multiprocessing.reduction import ForkingPickler
 from multiprocessing.shared_memory import SharedMemory
 from queue import Empty
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from ._timeouts import normalize_timeout
 from .convert import SharedMemoryMessage, attach, drop_spare_descriptor, load, validate_message
@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 # thread keeps the blocks the sender reuses mapped, within the same limits as its pool.
 _MAX_CACHED_MAPPINGS = 8
 _MAX_CACHED_BYTES = 256 * 2**20
+
+# How often a waiting get() checks whether its receiver was closed in the meantime.
+_WAKE_INTERVAL = 0.2
 
 
 def _remaining(block: bool, deadline: float | None) -> float | None:
@@ -175,22 +178,37 @@ class SharedMemoryReceiver:
         # so a consumer killed while idle would leave it taken and starve every other
         # consumer. Wait without it, and take it only to read a message that has arrived.
         queue: Any = self._data_queue  # Its reader, read lock and semaphore are private
-        if queue._closed:  # By an endpoint in this process
-            raise BrokenPipeError("The pair's queue was closed in this process")
         deadline = None if timeout is None else time.monotonic() + max(timeout, 0)
         while True:
-            if not queue._reader.poll(_remaining(block, deadline)):
-                raise Empty
-            if not queue._rlock.acquire(block, _remaining(block, deadline)):
-                raise Empty
+            self._ensure_pair_open()
+            remaining = _remaining(block, deadline)
+            # Wait in slices, so that closing the receiver wakes a get() without a timeout.
+            step = _WAKE_INTERVAL if remaining is None else min(remaining, _WAKE_INTERVAL)
             try:
-                if not queue._reader.poll():
-                    continue  # Another consumer read it first
-                data = queue._reader.recv_bytes()
-                queue._sem.release()
-            finally:
-                queue._rlock.release()
+                if not queue._reader.poll(step):
+                    if remaining is not None and remaining <= step:
+                        raise Empty
+                    continue
+                if not queue._rlock.acquire(block, _remaining(block, deadline)):
+                    raise Empty
+                try:
+                    if not queue._reader.poll():
+                        continue  # Another consumer read it first
+                    data = queue._reader.recv_bytes()
+                    queue._sem.release()
+                finally:
+                    queue._rlock.release()
+            except OSError:
+                # The queue feeder closes the pipe once the pair is closed in this process.
+                self._ensure_pair_open()
+                raise
             return ForkingPickler.loads(data)
+
+    def _ensure_pair_open(self) -> None:
+        if self._closed:
+            raise BrokenPipeError("Receiver is closed")
+        if cast(Any, self._data_queue)._closed:  # By an endpoint in this process
+            raise BrokenPipeError("The pair's queue was closed in this process")
 
     def close(self) -> None:
         """Release kept mappings and close this process's queue handles.

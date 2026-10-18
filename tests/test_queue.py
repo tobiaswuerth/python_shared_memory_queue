@@ -141,6 +141,66 @@ def test_nan_timeouts_are_rejected(make_pair, call):
         calls[call]()
 
 
+def test_close_wakes_a_thread_blocked_in_get(make_pair):
+    # Shutdown: the main thread closes the receiver while a consumer thread waits forever.
+    _, receiver = make_pair()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        blocked = pool.submit(receiver.get)  # No timeout
+        with pytest.raises(TimeoutError):
+            blocked.result(timeout=0.3)  # Still waiting
+        receiver.close()
+        with pytest.raises(BrokenPipeError):
+            blocked.result(timeout=5)
+
+
+def test_closing_the_pair_in_this_process_wakes_a_blocked_get(make_pair):
+    sender, receiver = make_pair()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        blocked = pool.submit(receiver.get, timeout=60)
+        with pytest.raises(TimeoutError):
+            blocked.result(timeout=0.3)
+        sender.close()  # Closes the shared queue objects of this process
+        with pytest.raises(BrokenPipeError):
+            blocked.result(timeout=5)
+
+
+class ClosingReader:
+    """A reader whose pipe is closed under a waiting get, as a queue feeder does."""
+
+    def __init__(self, reader, on_poll):
+        self.reader = reader
+        self.on_poll = on_poll
+
+    def poll(self, timeout=0.0):
+        self.on_poll()
+        raise OSError("handle is closed")
+
+    def __getattr__(self, name):
+        return getattr(self.reader, name)
+
+
+def test_pipe_closed_under_a_waiting_get_reports_a_closed_pair(make_pair, monkeypatch):
+    _, receiver = make_pair()
+    data_queue = receiver._data_queue
+
+    def close_meanwhile():
+        receiver._closed = True
+
+    monkeypatch.setattr(data_queue, "_reader", ClosingReader(data_queue._reader, close_meanwhile))
+    with pytest.raises(BrokenPipeError):
+        receiver.get(timeout=1)
+    monkeypatch.undo()
+    receiver._closed = False
+
+
+def test_unexplained_pipe_errors_propagate(make_pair, monkeypatch):
+    _, receiver = make_pair()
+    data_queue = receiver._data_queue
+    monkeypatch.setattr(data_queue, "_reader", ClosingReader(data_queue._reader, lambda: None))
+    with pytest.raises(OSError, match="handle is closed"):
+        receiver.get(timeout=1)
+
+
 def test_put_timeout_waits_for_capacity(make_pair):
     sender, _ = make_pair()
     sender.put(1)
