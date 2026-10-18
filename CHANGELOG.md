@@ -8,7 +8,9 @@ Faster receives:
   message's block again, which faulted in every page anew. Each receiving thread keeps at
   most `capacity` (up to 8) blocks and 256 MiB mapped, and `close()` releases them.
   Messages carry a random identity for each reusable block, so a new block that takes a
-  freed name is never read through an old mapping.
+  freed name is never read through an old mapping. On GitHub's runners, 1–100 MB messages
+  move up to 2.4× faster than with 4.2.1 on Windows, up to 1.7× on macOS, and up to 1.45×
+  on Linux.
 
 Fixes:
 
@@ -22,6 +24,8 @@ Fixes:
   supervisor scales a worker pool down, starved every other consumer of the pair forever.
   Receivers now wait for data without holding the queue's cross-process read lock and take
   it only to read a message that has arrived.
+- A thread blocked in `get()` without a timeout now wakes with `BrokenPipeError` when its
+  receiver is closed, instead of waiting forever and keeping the process from exiting.
 - A full `/dev/shm`, 64 MiB by default in Docker, no longer kills the producer with
   `SIGBUS`: the sender reserves a new block's pages up front on Linux, so `put` raises
   `OSError` (`ENOSPC`) and the sender stays usable.
