@@ -1,10 +1,18 @@
-"""Summarize benchmark reports from several platforms as a speedup table and matrix."""
+"""Summarize benchmark reports from several platforms as a speedup table and matrix.
+
+Each repeat of a benchmark runs both transports back to back, so the ratio of their
+durations is one speedup measured under the same conditions. A cell reports the median of
+these paired speedups and a distribution-free 95% confidence interval for that median.
+"""
 
 import argparse
 import json
 import math
+import statistics
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
+
+CONFIDENCE = 0.95
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -21,14 +29,43 @@ def size_label(size):
     return f"{size} B"
 
 
+class Speedup(NamedTuple):
+    median: float
+    low: float | None  # Confidence interval of the median; None with too few runs
+    high: float | None
+
+
+def median_interval(values, confidence=CONFIDENCE):
+    """A distribution-free confidence interval for the median, from order statistics.
+
+    The k-th smallest and k-th largest of n independent values enclose the median with
+    probability 1 - 2 P(B < k) for B ~ Binomial(n, 1/2); this picks the largest k that keeps
+    it at least `confidence`. None when there are too few values for any k.
+    """
+    ordered = sorted(values)
+    count, tail = len(ordered), (1 - confidence) / 2
+    k, below = 0, 0.0
+    while True:
+        below += math.comb(count, k) / 2**count  # P(B <= k)
+        if below > tail:
+            break
+        k += 1
+    return (ordered[k - 1], ordered[count - k]) if k else None
+
+
 def speedups(report):
-    """Shared-memory throughput relative to multiprocessing.Queue per size; None if failed."""
+    """Speedup over multiprocessing.Queue per size, or None where either transport failed."""
     rows = {(row["transport"], row["size"]): row for row in report["results"]}
     result = {}
     for size in sorted({size for _, size in rows}):
         shared, standard = rows.get(("shared", size)), rows.get(("standard", size))
         if shared and standard and shared["status"] == standard["status"] == "ok":
-            result[size] = shared["median_mib_per_second"] / standard["median_mib_per_second"]
+            # Both transports sent the same messages in a repeat: the duration ratio is the
+            # speedup, and pairing cancels most of the runner's drift between repeats.
+            pairs = zip(standard["durations_seconds"], shared["durations_seconds"], strict=True)
+            ratios = [standard_time / shared_time for standard_time, shared_time in pairs]
+            low, high = median_interval(ratios) or (None, None)
+            result[size] = Speedup(statistics.median(ratios), low, high)
         else:
             result[size] = None
     return result
@@ -50,10 +87,19 @@ def markdown(reports):
 def _cell(values, size):
     if size not in values:
         return "—"
-    if values[size] is None:
+    speedup = values[size]
+    if speedup is None:
         return "failed"
-    text = f"{values[size]:.2f}×"
-    return f"**{text}**" if values[size] >= 1 else text
+    text = f"{speedup.median:.2f}×"
+    if speedup.median >= 1:
+        text = f"**{text}**"
+    if speedup.low is not None:
+        text += f" ({speedup.low:.2f}–{speedup.high:.2f})"
+    return text
+
+
+def _short(value):
+    return f"{value:.1f}" if value >= 10 else f"{value:.2f}"
 
 
 def _luminance(color):
@@ -82,8 +128,9 @@ def plot(reports, output, subtitle=""):
 
     table = [(report["label"], speedups(report)) for report in reports]
     sizes = sorted({size for _, values in table for size in values})
+    cells = [[values.get(size) for size in sizes] for _, values in table]
     ratios = np.array(
-        [[values.get(size) or math.nan for size in sizes] for _, values in table], dtype=float
+        [[math.nan if cell is None else cell.median for cell in row] for row in cells], dtype=float
     )
     logs = np.log10(ratios)
     limit = max(math.log10(4), float(np.nanmax(np.abs(logs))))
@@ -92,7 +139,7 @@ def plot(reports, output, subtitle=""):
 
     plt.rcParams.update({"font.size": 11, "font.family": "DejaVu Sans"})
     fig, ax = plt.subplots(
-        figsize=(1.25 * len(sizes) + 3.4, 0.62 * len(table) + 2.0),
+        figsize=(1.3 * len(sizes) + 3.4, 0.8 * len(table) + 2.0),
         layout="constrained",
         facecolor=SURFACE,
     )
@@ -101,20 +148,44 @@ def plot(reports, output, subtitle=""):
         np.ma.masked_invalid(logs), cmap=cmap, norm=norm, edgecolors=SURFACE, linewidth=2
     )
     for row, column in np.ndindex(ratios.shape):
-        if math.isnan(ratios[row, column]):
-            text, color = ("failed" if sizes[column] in table[row][1] else "—"), SECONDARY_INK
-        else:
-            value = ratios[row, column]
-            text = f"{value:.1f}×" if value >= 10 else f"{value:.2f}×"
-            rgba = cast(tuple[float, float, float, float], cmap(norm(logs[row, column])))
-            color = label_ink(to_hex(rgba))
-        ax.text(column + 0.5, row + 0.5, text, ha="center", va="center", color=color, fontsize=10)
+        speedup = cells[row][column]
+        if speedup is None:
+            text = "failed" if sizes[column] in table[row][1] else "—"
+            ax.text(column + 0.5, row + 0.5, text, ha="center", va="center", color=SECONDARY_INK)
+            continue
+        rgba = cast(tuple[float, float, float, float], cmap(norm(logs[row, column])))
+        color = label_ink(to_hex(rgba))
+        middle = row + 0.5 if speedup.low is None else row + 0.38
+        ax.text(
+            column + 0.5,
+            middle,
+            f"{_short(speedup.median)}×",
+            ha="center",
+            va="center",
+            color=color,
+            fontsize=10,
+        )
+        if speedup.low is not None:
+            interval = f"{_short(speedup.low)}–{_short(speedup.high)}"
+            ax.text(
+                column + 0.5,
+                row + 0.7,
+                interval,
+                ha="center",
+                va="center",
+                color=color,
+                fontsize=7.5,
+                alpha=0.85,
+            )
 
     ax.set_xticks(np.arange(len(sizes)) + 0.5, [size_label(size) for size in sizes])
     ax.set_yticks(np.arange(len(table)) + 0.5, [label for label, _ in table])
     ax.invert_yaxis()
     ax.tick_params(length=0, colors=SECONDARY_INK)
-    ax.set_xlabel("Payload per message", color=SECONDARY_INK)
+    label = "Payload per message"
+    if any(cell is not None and cell.low is not None for row in cells for cell in row):
+        label += "  ·  small figures: 95% confidence interval of the median"
+    ax.set_xlabel(label, color=SECONDARY_INK)
     ax.spines[:].set_visible(False)
     ax.set_title(
         "py-sharedmemory speedup over multiprocessing.Queue",

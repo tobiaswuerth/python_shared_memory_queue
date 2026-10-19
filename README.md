@@ -13,7 +13,7 @@
 **A fast `multiprocessing.Queue` alternative for large Python objects and NumPy arrays.**
 Payloads travel between processes through shared memory instead of pipes; the queues
 underneath carry only a few bytes of metadata per message. Multi-megabyte batches,
-images, and simulation states arrive up to 3.6× faster on Windows and up to 7.4× faster on
+images, and simulation states arrive up to 3.5× faster on Windows and up to 7.9× faster on
 Linux, on macOS even small messages beat a bounded `multiprocessing.Queue`, and transfers
 too large for `multiprocessing.Queue` still work.
 
@@ -86,7 +86,7 @@ NumPy arrays, image or video frames, RL rollouts, large `bytes`, or big nested o
 [Performance](#performance).
 
 On Linux and Windows, prefer `multiprocessing.Queue` for small messages: up to about
-100 kB it is 1.5–4× faster, because handling a shared-memory block for every message
+100 kB it is 1.5–3.6× faster, because handling a shared-memory block for every message
 costs more than the pipe.
 
 On free-threaded Python (`python3.14t` and later), threads run Python code in parallel.
@@ -102,33 +102,36 @@ directly. py-sharedmemory delivers an independent copy of each message.
 
 ![Speedup of py-sharedmemory over multiprocessing.Queue for each platform and payload size from 1 kB to 100 MB](https://raw.githubusercontent.com/tobiaswuerth/python_shared_memory_queue/main/benchmarks/results/platforms.png)
 
-Speedup over `multiprocessing.Queue`; above 1× means py-sharedmemory is faster.
+Speedup over `multiprocessing.Queue`; above 1× means py-sharedmemory is faster. Each cell
+is the median of 50 paired runs, with the 95% confidence interval of that median in
+parentheses.
 
 | Platform | 1 kB | 10 kB | 100 kB | 1 MB | 10 MB | 100 MB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Linux x64 | 0.33× | 0.32× | 0.45× | **3.32×** | **5.30×** | **2.80×** |
-| Linux arm64 | 0.32× | 0.36× | 0.52× | **2.57×** | **7.42×** | **2.68×** |
-| Windows x64 | 0.25× | 0.28× | 0.51× | **2.50×** | **3.07×** | **3.34×** |
-| Windows arm64 | 0.30× | 0.31× | 0.63× | **1.11×** | **3.06×** | **3.62×** |
-| macOS arm64 | **11.87×** | **22.58×** | **17.02×** | **10.87×** | **5.34×** | **5.42×** |
+| Linux x64 | 0.32× (0.31–0.33) | 0.33× (0.32–0.34) | 0.48× (0.48–0.50) | **3.31×** (3.24–3.38) | **4.92×** (4.82–4.98) | **2.89×** (2.81–3.01) |
+| Linux arm64 | 0.34× (0.34–0.35) | 0.36× (0.35–0.37) | 0.55× (0.54–0.57) | **3.06×** (2.95–3.13) | **7.90×** (7.73–8.02) | **2.75×** (2.72–2.80) |
+| Windows x64 | 0.28× (0.28–0.29) | 0.30× (0.30–0.31) | 0.55× (0.55–0.56) | **2.09×** (1.91–2.35) | **3.22×** (3.16–3.25) | **3.46×** (3.44–3.50) |
+| Windows arm64 | 0.31× (0.31–0.32) | 0.33× (0.32–0.33) | 0.64× (0.62–0.65) | **1.12×** (1.11–1.13) | **3.00×** (2.99–3.02) | **3.50×** (3.46–3.53) |
+| macOS arm64 | **11.96×** (10.20–13.04) | **18.04×** (14.98–21.99) | **27.29×** (23.23–29.80) | **23.64×** (21.48–27.08) | **6.61×** (6.09–7.10) | **5.73×** (5.34–6.16) |
 
-- **Linux, x86-64 and ARM64:** 2.6–7.4× faster from 1 MB. Up to 100 kB,
-  `multiprocessing.Queue` is 2–3× faster.
-- **Windows x86-64:** 2.5–3.3× faster from 1 MB, and 2–4× slower up to 100 kB.
-- **Windows ARM64:** about even at 1 MB, and 3–3.6× faster from 10 MB.
-- **macOS (Apple Silicon):** 5–23× faster at every size. macOS has no timed semaphore
+- **Linux, x86-64 and ARM64:** 2.8–7.9× faster from 1 MB. Up to 100 kB,
+  `multiprocessing.Queue` is 1.8–3.1× faster.
+- **Windows x86-64:** 2.1–3.5× faster from 1 MB, and 1.8–3.6× slower up to 100 kB.
+- **Windows ARM64:** slightly faster at 1 MB, and 3–3.5× faster from 10 MB.
+- **macOS (Apple Silicon):** 5.7–27× faster at every size. macOS has no timed semaphore
   wait, so a full bounded `multiprocessing.Queue` whose `put` has a timeout, as here,
   [polls with sleeps of up to 20 ms](https://github.com/python/cpython/blob/main/Modules/_multiprocessing/semaphore.c).
   py-sharedmemory enforces its capacity with a thread condition instead.
 
 Measured by the [benchmark workflow](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/.github/workflows/benchmark.yml)
-on GitHub-hosted runners on 2026-10-18: py-sharedmemory 4.3.0, Python 3.14.8, NumPy 2.5.4,
-contiguous float32 arrays, `spawn`, capacity 2 for both queues, and the median of 5 runs
-that alternate between the two. The runners are shared virtual machines, so compare the
-speedups, not absolute throughput. Run-to-run spread is mostly within 20% on Linux and
-Windows and larger on macOS, whose speedups dwarf it. See the
+on GitHub-hosted runners on 2026-10-19: py-sharedmemory 4.3.1, Python 3.14.8, NumPy 2.5.4,
+contiguous float32 arrays, `spawn`, and capacity 2 for both queues. Each run sends the same
+messages through both queues back to back, alternating which goes first, and the ratio of
+their times is one speedup; pairing them cancels most of the drift of the shared virtual
+machines, whose absolute throughput says little. The intervals are distribution-free,
+from the order statistics of the 50 speedups. See the
 [raw results](https://github.com/tobiaswuerth/python_shared_memory_queue/tree/main/benchmarks/results/platforms).
-The workflow reruns on every release.
+The workflow reruns with 20 runs on every release.
 
 **Larger messages:** the speedup holds beyond the 100 MB that shared runners can hold. On
 a Windows desktop, an earlier version stayed 1.8× faster at 100 MB and 1.5× faster at 1 GB,

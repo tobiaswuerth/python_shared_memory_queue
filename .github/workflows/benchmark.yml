@@ -6,6 +6,10 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      repeats:
+        description: Paired runs per payload size; more runs narrow the confidence intervals
+        default: "20"
   pull_request:
     paths:
       - "benchmarks/*.py"
@@ -20,12 +24,16 @@ concurrency:
 
 env:
   SIZES: "1000 10000 100000 1000000 10000000 100000000"
+  # Pull requests only check that the benchmark works; six runs give the first 95% interval.
+  REPEATS: ${{ github.event_name == 'pull_request' && '6' || inputs.repeats || '20' }}
+  # The tables use × and –, which Windows' default encoding would garble in job summaries.
+  PYTHONUTF8: "1"
 
 jobs:
   benchmark:
     name: Benchmark (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +55,7 @@ jobs:
       - name: Benchmark
         shell: bash
         run: >-
-          python -m benchmarks.benchmark --sizes $SIZES --repeats 5
+          python -m benchmarks.benchmark --sizes $SIZES --repeats "$REPEATS"
           --label "${{ matrix.label }}" --json "${{ matrix.file }}.json"
       - name: Job summary
         shell: bash
@@ -85,7 +93,7 @@ jobs:
           done
           version=$(python -c "import py_sharedmemory; print(py_sharedmemory.__version__)")
           subtitle="GitHub-hosted runners · py-sharedmemory $version · Python 3.14 · NumPy float32"
-          subtitle="$subtitle · capacity 2 · median of 5 runs · $(date -u +%Y-%m-%d)"
+          subtitle="$subtitle · capacity 2 · median of $REPEATS paired runs · $(date -u +%Y-%m-%d)"
           {
             echo "## Speedup over multiprocessing.Queue"
             echo
