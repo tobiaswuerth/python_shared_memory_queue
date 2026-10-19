@@ -16,6 +16,7 @@ from queue import Empty, Full
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
+from ._sharing import release_queues, share_queues
 from ._timeouts import normalize_timeout
 from .convert import SharedMemoryMessage, create_shared_memory, release_shared_memory, serialize
 
@@ -97,6 +98,7 @@ class SharedMemorySender:
         self._ack_thread: threading.Thread | None = None
         self._ack_error: Exception | None = None
         self._finalizer: Finalize[None] | None = None
+        share_queues(data_queue, self)
 
     @property
     def closed(self) -> bool:
@@ -154,7 +156,8 @@ class SharedMemorySender:
     def close(self) -> None:
         """Free unread messages and reusable blocks, stop acknowledgements, close the queues.
 
-        Idempotent, and the acknowledgement thread has stopped once it returns. Unread
+        Idempotent, and the acknowledgement thread has stopped once it returns. The queues
+        stay open while the pair's receiver in this process is open; it closes them. Unread
         messages are discarded silently, so drain with `wait_for_all_ack` first. Also runs
         automatically when the producing process exits normally, warning if that discards
         messages.
@@ -172,14 +175,18 @@ class SharedMemorySender:
         self._join_ack_thread()
         if already_closed:
             return
+        last_endpoint = release_queues(self._data_queue, self)
         for queue in (self._data_queue, self._ack_queue):
             try:
                 if discarding_messages:
-                    # Unread metadata must not keep the queue feeder alive at exit.
+                    # Unread metadata must not keep the queue feeder alive at exit, even
+                    # while another endpoint of this process, maybe one inherited through
+                    # fork and never used, keeps the queue open.
                     queue.cancel_join_thread()
-                queue.close()
-                if not discarding_messages:
-                    queue.join_thread()
+                if last_endpoint:
+                    queue.close()
+                    if not discarding_messages:
+                        queue.join_thread()
             except Exception as error:
                 errors.append(error)
         if errors:
@@ -233,6 +240,7 @@ class SharedMemorySender:
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         self._condition = threading.Condition()
+        share_queues(self._data_queue, self)
 
     def _check_process(self) -> None:
         if self._process_id is not None and self._process_id != os.getpid():

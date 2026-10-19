@@ -15,6 +15,7 @@ from queue import Empty
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self, cast
 
+from ._sharing import release_queues, share_queues
 from ._timeouts import normalize_timeout
 from .convert import SharedMemoryMessage, attach, drop_spare_descriptor, load, validate_message
 
@@ -92,12 +93,13 @@ class SharedMemoryReceiver:
         # name, and a child that has not started yet could no longer open it.
         self._owner_lock = owner_lock
         self._closed = False
-        self._init_mappings()
+        self._init_process_state()
 
-    def _init_mappings(self) -> None:
+    def _init_process_state(self) -> None:
         self._mappings = threading.local()
         # Every thread's cache, for close(); a finished thread's cache is freed with it.
         self._caches: weakref.WeakSet[_MappingCache] = weakref.WeakSet()
+        share_queues(self._data_queue, self)
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
@@ -106,7 +108,7 @@ class SharedMemoryReceiver:
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
-        self._init_mappings()
+        self._init_process_state()
 
     @property
     def closed(self) -> bool:
@@ -219,7 +221,8 @@ class SharedMemoryReceiver:
     def close(self) -> None:
         """Release kept mappings and close this process's queue handles.
 
-        Acknowledgements are flushed first. Idempotent. Other processes sharing the
+        Acknowledgements are flushed first. Idempotent. The queues stay open while the
+        pair's sender in this process is open; it closes them. Other processes sharing the
         receiver are unaffected.
         """
         if self._closed:
@@ -227,6 +230,8 @@ class SharedMemoryReceiver:
         self._closed = True
         for cache in list(self._caches):
             cache.close()
+        if not release_queues(self._data_queue, self):
+            return
         try:
             self._data_queue.cancel_join_thread()
             self._data_queue.close()

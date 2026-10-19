@@ -110,6 +110,44 @@ def test_orchestrator_launches_pipelines_without_keeping_their_endpoints(ctx):
     assert consumers == {tag: [(index, True) for index in range(5)] for tag in range(4)}
 
 
+@pytest.mark.parametrize("parent", ["produces", "consumes"])
+def test_parent_closes_its_copy_of_the_endpoint_it_handed_over(parent):
+    # As with the unused end of a Pipe, the parent closes its copy of the endpoint it passed
+    # to the child right after starting it, and keeps using the other endpoint.
+    ready, outcomes = SPAWN.Queue(), SPAWN.Queue()
+    sender, receiver = create_shared_memory_pair(2, ctx=SPAWN)
+    if parent == "produces":
+        target, args = workloads.tagged_consumer, (receiver, 0, ready, outcomes)
+    else:
+        target, args = workloads.tagged_producer, (sender, 0, 6, ready, outcomes)
+    child = SPAWN.Process(target=target, args=args)
+    child.start()
+    try:
+        if parent == "produces":
+            receiver.close()
+            with sender:
+                for index in range(6):
+                    send(sender, (0, index, np.full(10_000, index)), [child])
+                send(sender, None, [child])
+                assert sender.wait_for_all_ack(timeout=20)
+            assert receive(outcomes, [child]) == ("consumer", 0, [(i, True) for i in range(6)])
+        else:
+            sender.close()
+            received = []
+            while (message := receive(receiver, [child])) is not None:
+                _, index, payload = message
+                assert (payload == index).all()
+                received.append(index)
+            assert received == list(range(6))
+            assert receive(outcomes, [child]) == ("producer", 0, "ok")
+    finally:
+        stop([child])
+        sender.close()
+        receiver.close()
+        close_queues(ready, outcomes)
+    assert child.exitcode == 0
+
+
 def test_one_pair_per_producer_feeds_one_parent():
     # The README's advice for several producers: one pair each. Rebinding the loop variables
     # releases each previous sender, exactly as ordinary code does.
@@ -521,9 +559,9 @@ for index in range(20):
 assert sender.wait_for_all_ack(timeout=10)
 consumer.join(10)
 assert [message[-1] for message in received] == list(range(20))
-# Closing the receiver first closes the pair's queues under the sender's acknowledgement
-# thread, which on Windows cuts off its read of the acknowledgement pipe.
+# The consumer is done; the sender keeps the pair's queues open until it closes too.
 receiver.close()
+assert sender.wait_for_all_ack(timeout=1)
 sender.close()
 print("closed")
 """
