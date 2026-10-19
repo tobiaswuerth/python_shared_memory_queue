@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from py_sharedmemory import SharedMemoryReceiver, SharedMemorySender, create_shared_memory_pair
+from py_sharedmemory import receiver as receiver_module
 from py_sharedmemory import sender as sender_module
 from py_sharedmemory.convert import release_shared_memory, serialize
 
@@ -240,6 +241,58 @@ def test_pipe_closed_under_a_get_releases_the_cut_off_read(make_pair, monkeypatc
     assert reads[0]() is None
     monkeypatch.undo()
     receiver._closed = False
+
+
+def test_pipe_closed_at_exit_raises_broken_pipe_in_the_main_thread(make_pair, monkeypatch):
+    # Exit handlers close the queues; get() in the main thread reports a closed pair.
+    _, receiver = make_pair()
+    reads = []
+    data_queue = receiver._data_queue
+    monkeypatch.setattr(receiver_module.util, "is_exiting", lambda: True)
+    monkeypatch.setattr(data_queue, "_reader", CutOffReader(reads, lambda: None))
+    with pytest.raises(BrokenPipeError, match="exiting") as caught:
+        receiver.get(timeout=1)
+    gc.collect()
+    assert isinstance(caught.value.__cause__, OSError)
+    assert reads[0]() is None
+
+
+def test_pipe_closed_at_exit_leaves_a_daemon_thread_waiting(make_pair, monkeypatch):
+    # A daemon consumer thread waits in get() when the program ends. An exception printed
+    # from it while the interpreter shuts down can abort the process, so it waits instead
+    # until the exit stops it.
+    _, receiver = make_pair()
+    waiting_out_exit = threading.Event()
+    outcome = []
+    data_queue = receiver._data_queue
+    monkeypatch.setattr(receiver_module.util, "is_exiting", lambda: True)
+    monkeypatch.setattr(receiver_module, "_wait_for_exit", waiting_out_exit.set)
+    monkeypatch.setattr(data_queue, "_reader", CutOffReader([], lambda: None))
+
+    def consume():
+        try:
+            receiver.get()
+        except BrokenPipeError as error:
+            outcome.append(error)
+
+    consumer = threading.Thread(target=consume, daemon=True)
+    consumer.start()
+    consumer.join(5)
+    assert waiting_out_exit.is_set()
+    assert len(outcome) == 1  # Only once the stand-in for waiting forever returned
+
+
+def test_waiting_for_exit_has_no_timeout(monkeypatch):
+    waits = []
+
+    class RecordingEvent:
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return True
+
+    monkeypatch.setattr(threading, "Event", RecordingEvent)
+    receiver_module._wait_for_exit()
+    assert waits == [None]  # Only the end of the process stops the thread
 
 
 def test_unexplained_pipe_errors_propagate(make_pair, monkeypatch):

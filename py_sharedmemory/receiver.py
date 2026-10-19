@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import errno
+import pickle
 import threading
 import time
 import weakref
 from collections import OrderedDict
 from contextlib import suppress
+from multiprocessing import util
 from multiprocessing.queues import Queue
-from multiprocessing.reduction import ForkingPickler
 from multiprocessing.shared_memory import SharedMemory
 from queue import Empty
 from types import TracebackType
@@ -29,6 +30,11 @@ _MAX_CACHED_BYTES = 256 * 2**20
 
 # How often a waiting get() checks whether its receiver was closed in the meantime.
 _WAKE_INTERVAL = 0.2
+
+
+def _wait_for_exit() -> None:
+    """Block a daemon thread until the exiting interpreter stops it."""
+    threading.Event().wait()
 
 
 def _remaining(block: bool, deadline: float | None) -> float | None:
@@ -201,7 +207,8 @@ class SharedMemoryReceiver:
                 finally:
                     queue._rlock.release()
             except OSError as error:
-                # The queue feeder closes the pipe once the pair is closed in this process.
+                # The queue feeder closes the pipe once the pair is closed in this process,
+                # and multiprocessing's exit handlers close it as the process ends.
                 try:
                     self._ensure_pair_open()
                 except BrokenPipeError:
@@ -209,8 +216,15 @@ class SharedMemoryReceiver:
                     # request that can no longer be cancelled; release it now, not at exit.
                     error.__traceback__ = None
                     raise
-                raise
-            return ForkingPickler.loads(data)
+                if not util.is_exiting():
+                    raise
+                error.__traceback__ = None
+                if threading.current_thread().daemon:
+                    # An exception printed while the interpreter shuts down can abort the
+                    # process, so let the exit stop this thread instead.
+                    _wait_for_exit()
+                raise BrokenPipeError("The process is exiting") from error
+            return pickle.loads(data)  # What multiprocessing's ForkingPickler.loads is
 
     def _ensure_pair_open(self) -> None:
         if self._closed:
