@@ -26,7 +26,7 @@ too large for `multiprocessing.Queue` still work.
   reused for later messages, so shared memory stays within `capacity × message size`.
 - **One producer, many consumers:** consumer processes and threads share one receiver.
 - **Portable:** Linux, macOS, and Windows on x86-64 and ARM64; `spawn`, `fork`, and
-  `forkserver`; Python 3.11–3.15, including free-threaded 3.14t and 3.15t.
+  `forkserver`; Python 3.11–3.15, including free-threaded 3.15t.
 - **Lightweight:** no dependencies, fully typed (PEP 561), and 100% test coverage.
 
 Built for **machine-learning data pipelines, reinforcement-learning actors and replay
@@ -41,7 +41,7 @@ pip install py-sharedmemory
 
 > **Upgrading from 3.x?** The import package is now `py_sharedmemory` (previously
 > `memory`). Replace `from memory import ...` with `from py_sharedmemory import ...`;
-> nothing else changed.
+> the API is otherwise the same.
 
 ## Quick start
 
@@ -121,10 +121,6 @@ Speedup over `multiprocessing.Queue`; above 1× means py-sharedmemory is faster.
   [polls with sleeps of up to 20 ms](https://github.com/python/cpython/blob/main/Modules/_multiprocessing/semaphore.c).
   py-sharedmemory enforces its capacity with a thread condition instead.
 
-Version 4.3.0 moves 1–100 MB messages up to 2.4× faster than 4.2.1 on Windows, up to 1.7×
-on macOS, and up to 1.45× on Linux, because receivers now keep their mappings of the
-blocks the sender reuses.
-
 Measured by the [benchmark workflow](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/.github/workflows/benchmark.yml)
 on GitHub-hosted runners on 2026-10-18: py-sharedmemory 4.3.0, Python 3.14.8, NumPy 2.5.4,
 contiguous float32 arrays, `spawn`, capacity 2 for both queues, and the median of 5 runs
@@ -134,38 +130,19 @@ Windows and larger on macOS, whose speedups dwarf it. See the
 [raw results](https://github.com/tobiaswuerth/python_shared_memory_queue/tree/main/benchmarks/results/platforms).
 The workflow reruns on every release.
 
-### Large messages on a desktop
-
-Beyond 100 MB, which shared runners cannot hold, a desktop shows the same picture up to
-10 GB, where `multiprocessing.Queue` fails:
-
-![Transfer speed relative to multiprocessing.Queue, from 16 bytes to 10 GB](https://raw.githubusercontent.com/tobiaswuerth/python_shared_memory_queue/main/benchmarks/results/windows-numpy.png)
-
-| Payload per message | `multiprocessing.Queue` | py-sharedmemory | Speedup |
-| --- | ---: | ---: | ---: |
-| 100 kB | 2,315 MiB/s | 797 MiB/s | 0.34× |
-| 1 MB | 1,022 MiB/s | 2,056 MiB/s | **2.01×** |
-| 10 MB | 1,177 MiB/s | 2,387 MiB/s | **2.03×** |
-| 100 MB | 1,034 MiB/s | 1,820 MiB/s | **1.76×** |
-| 1 GB | 855 MiB/s | 1,262 MiB/s | **1.47×** |
-| 10 GB | failed (Windows error 87) | 8.0 s per message | — |
-
-Core i9-14900K, 191.8 GiB RAM, Windows 11, Python 3.12.10, NumPy 2.5.3, measured on
-2026-10-08. Contiguous float32 arrays, `spawn`, capacity 2, median of 5 runs excluding
-startup and warmup; up to 1,000 messages or 512 MiB per run, at least one message.
-1 GB = 10⁹ bytes. See the [raw results](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/benchmarks/results/windows-numpy.json).
-These numbers show transfer speed; I/O load and stability depend on the workload. They
-predate version 4.2, which reuses received blocks of up to 256 MiB and so no longer faults
-in fresh pages on every `put` at those sizes.
+**Larger messages:** the speedup holds beyond the 100 MB that shared runners can hold. On
+a Windows desktop, an earlier version stayed 1.8× faster at 100 MB and 1.5× faster at 1 GB,
+and at 10 GB per message `multiprocessing.Queue` failed while py-sharedmemory delivered
+each message in 7.5 s ([raw results](https://github.com/tobiaswuerth/python_shared_memory_queue/blob/main/benchmarks/results/windows-numpy.json)).
 
 ## How it works
 
 1. `put()` pickles the object with protocol 5. Large buffers, such as NumPy array data and
-   `bytes` or `bytearray` objects of 64 KiB or more, never enter the pickle; everything is copied once,
-   from the original objects into one shared-memory block: a block from an earlier,
-   received message when one fits, otherwise a new one.
-2. Only the block's name, buffer sizes, and a sequence number travel through a
-   `multiprocessing.Queue`.
+   `bytes` or `bytearray` objects of 64 KiB or more, never enter the pickle; everything is
+   copied once, from the original objects into one shared-memory block: a block from an
+   earlier, received message when one fits, otherwise a new one.
+2. Only the block's name and identity, the buffer sizes, and a sequence number travel
+   through a `multiprocessing.Queue`.
 3. `get()` maps the block, or reuses its mapping from an earlier message, copies the data
    into local memory, unpickles it, and sends an acknowledgement back.
 4. A background thread in the producer makes the block available for reuse when the
@@ -346,8 +323,8 @@ for the underlying queues; it defaults to `multiprocessing.get_context()`.
 limit to 64 MB by default. Raise it to at least `capacity × largest message`, for example
 `docker run --shm-size=2g` or `shm_size: 2gb` in Docker Compose. In Kubernetes, mount an
 `emptyDir` volume with `medium: Memory` at `/dev/shm`. Otherwise `put` raises
-`OSError: [Errno 28] No space left on device`. Since 4.3.0 the sender reserves each new
-block's pages up front, so a full `/dev/shm` no longer kills the producer with `SIGBUS`.
+`OSError: [Errno 28] No space left on device`; the sender reserves a new block's pages up
+front, so a full `/dev/shm` raises this error instead of killing the producer with `SIGBUS`.
 
 **Linux:** outside containers, `/dev/shm` usually defaults to half of physical RAM.
 
@@ -359,19 +336,21 @@ waits or raises `queue.Full` like a full bounded pair.
 **Windows:** shared memory is backed by the page file, and each block disappears once
 the last handle closes, so nothing can leak after a crash.
 
-**"resource_tracker: There appear to be N leaked shared_memory objects":** fixed in
-3.0.1. Upgrade if you see this warning with the `fork` start method.
+**"resource_tracker: There appear to be N leaked shared_memory objects"** (or semaphore
+objects): a process was killed or crashed before releasing the blocks or semaphores it
+created, and Python's resource tracker freed them when the program ended. Nothing stays
+behind; stop workers cooperatively, for example with a stop event, to avoid the warning.
 
 **`FileNotFoundError: Shared-memory block was freed before it was received`:** the
 producer closed or exited before this message was read. Call `wait_for_all_ack()` before
 closing the sender; the sender also warns when this happens.
 
 **`OSError: [Errno 24] Too many open files`:** on Linux and macOS each pair costs a
-process 4 file descriptors for its queues, plus 1 per block the sender keeps for reuse
-and 1 per block a receiving thread keeps mapped, each at most `capacity` (up to 8).
-Unread messages beyond that hold none. Since 4.3.0 a kept block costs one descriptor
-instead of two, and a receiver that runs out releases its kept mappings and retries.
-For many pairs on macOS, whose default limit is 256, raise it with `ulimit -n`.
+process 4 file descriptors for its queues, on macOS a few more for its semaphores, plus 1
+per block the sender keeps for reuse and 1 per block a receiving thread keeps mapped, each
+at most `capacity` (up to 8). Unread messages beyond that hold none, and a receiver that
+runs out releases its kept mappings and retries. For many pairs on macOS, whose default
+limit is 256, raise it with `ulimit -n`.
 
 **`RuntimeError: A shared-memory pair supports one producing process`:** a second
 process called `put`. Create a separate pair for each producer process.

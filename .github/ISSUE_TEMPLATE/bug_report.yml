@@ -25,7 +25,7 @@ body:
     id: version
     attributes:
       label: py-sharedmemory version
-      placeholder: "4.0.0"
+      description: 'Shown by `python -c "import py_sharedmemory; print(py_sharedmemory.__version__)"`'
     validations:
       required: true
   - type: input

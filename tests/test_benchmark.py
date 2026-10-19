@@ -135,31 +135,14 @@ def _row(transport, size, status="ok", throughput=100.0):
     return row
 
 
-@pytest.mark.parametrize("with_failure", [False, True])
-def test_plot_writes_png(tmp_path, with_failure):
-    pytest.importorskip("matplotlib")
-    from benchmarks import plot
-
-    results = [_row("standard", 16, throughput=50), _row("shared", 16, throughput=25)]
-    results += [_row("standard", 10**6), _row("shared", 10**6, throughput=200)]
-    if with_failure:
-        results += [_row("standard", 10**10, status="failed"), _row("shared", 10**10)]
-    report_path = tmp_path / "report.json"
-    report_path.write_text(json.dumps({"results": results}), encoding="utf-8")
-    image = tmp_path / "plot.png"
-    plot.main([str(report_path), str(image)])
-    assert image.read_bytes().startswith(b"\x89PNG")
-
-
 @pytest.mark.parametrize(
     ("size", "label"),
     [(16, "16 B"), (1_000, "1 kB"), (2_500_000, "2.5 MB"), (10**10, "10 GB")],
 )
-def test_plot_size_labels(size, label):
-    pytest.importorskip("matplotlib")
-    from benchmarks.plot import _size_label
+def test_size_labels(size, label):
+    from benchmarks.compare import size_label
 
-    assert _size_label(size) == label
+    assert size_label(size) == label
 
 
 def _report(path, label, rows):

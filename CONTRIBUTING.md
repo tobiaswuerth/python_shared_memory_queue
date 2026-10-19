@@ -43,12 +43,11 @@ through WSL before changing process handling.
 ```sh
 python -m pip install -e ".[benchmark]"
 python -m benchmarks.benchmark --sizes 1000000 10000000 --repeats 3 --json results.json
-python -m benchmarks.plot results.json chart.png
+python -m benchmarks.compare results.json --image results.png
 ```
 
-`python -m benchmarks.benchmark --help` lists all options. The published chart used
-`--sizes 16 100 1000 10000 100000 1000000 10000000 100000000 1000000000 10000000000
---repeats 5`, which needs enough RAM for several copies of a 10 GB payload.
+`python -m benchmarks.benchmark --help` lists all options. `benchmarks.compare` prints the
+speedups as a Markdown table and draws them as a matrix, one row per report.
 
 The [benchmark workflow](.github/workflows/benchmark.yml) runs on every release, on demand,
 and on pull requests that change the benchmarks. It measures Linux, Windows, and macOS

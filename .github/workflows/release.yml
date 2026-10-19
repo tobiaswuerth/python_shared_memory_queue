@@ -1,6 +1,6 @@
 name: Release
 
-# Publishing a GitHub release whose tag matches the package version (e.g. v3.0.1)
+# Publishing a GitHub release whose tag matches the package version (vX.Y.Z)
 # uploads the build to PyPI through trusted publishing and attaches it to the release.
 on:
   release:
