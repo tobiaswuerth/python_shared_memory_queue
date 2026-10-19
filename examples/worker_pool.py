@@ -1,5 +1,7 @@
 """Fan large tasks out to several consumer processes that share one receiver."""
 
+from __future__ import annotations  # Queue[...] is subscriptable at runtime only from 3.12
+
 import multiprocessing as mp
 import zlib
 from multiprocessing.queues import Queue
