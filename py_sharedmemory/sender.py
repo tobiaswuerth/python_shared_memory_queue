@@ -14,7 +14,7 @@ from multiprocessing.synchronize import SEM_VALUE_MAX  # type: ignore[attr-defin
 from multiprocessing.util import Finalize
 from queue import Empty, Full
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from ._sharing import release_queues, share_queues
 from ._timeouts import normalize_timeout
@@ -43,10 +43,11 @@ _SMALL_BLOCK_BYTES = 2**20
 
 # The metadata queue holds at most SEM_VALUE_MAX unread items (32,767 on macOS); beyond
 # that its put would raise queue.Full even for a blocking put on an unbounded sender.
-_MAX_OUTSTANDING = SEM_VALUE_MAX
+_MAX_OUTSTANDING = cast(int, SEM_VALUE_MAX)
 
 
-def _validate_capacity(capacity: int | None) -> None:
+def validate_capacity(capacity: object) -> None:
+    """Reject anything but None or a non-negative int; callers may pass any object."""
     if capacity is None:
         return
     if not isinstance(capacity, int) or isinstance(capacity, bool):
@@ -78,7 +79,7 @@ class SharedMemorySender:
         *,
         owner_lock: Lock | None = None,
     ) -> None:
-        _validate_capacity(capacity)
+        validate_capacity(capacity)
         self.capacity = capacity
         self._data_queue = data_queue
         self._ack_queue = ack_queue
@@ -166,9 +167,9 @@ class SharedMemorySender:
         errors: list[Exception] = []
         with self._condition:
             already_closed = self._closed
+            discarding_messages = self._pending_count > 0  # Used only when closing now
             if not already_closed:
                 self._closed = True
-                discarding_messages = self._pending_count > 0
                 self._free_all_blocks(errors)
         # Also when already closed: the acknowledgement thread may have closed the sender
         # and still be closing the queues.

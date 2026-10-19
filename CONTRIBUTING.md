@@ -21,6 +21,7 @@ pre-commit install
 ```sh
 python -m pytest --cov        # Tests; 100% branch coverage is required
 pre-commit run --all-files    # Ruff lint and format, strict mypy, file and schema checks
+basedpyright                  # Strict pyright, with the settings editors read from pyproject
 ```
 
 The pre-commit hook runs the same checks on every commit. CI runs the tests on Linux,

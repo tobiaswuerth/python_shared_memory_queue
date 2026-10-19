@@ -10,7 +10,7 @@ WORKERS = 3
 TASKS = 12
 
 
-def work(receiver: SharedMemoryReceiver, results: Queue) -> None:
+def work(receiver: SharedMemoryReceiver, results: Queue[tuple[int, int]]) -> None:
     with receiver:
         while (task := receiver.get(timeout=30)) is not None:
             task_id, chunk = task

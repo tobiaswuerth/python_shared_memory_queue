@@ -174,26 +174,35 @@ def load(message: SharedMemoryMessage, allocation: SharedMemory) -> Any:
         return pickle.loads(pickle_data, buffers=buffers)
 
 
-def validate_message(message: SharedMemoryMessage) -> None:
-    """Reject metadata that is malformed before any of it is used."""
-    if not isinstance(message, SharedMemoryMessage) or not isinstance(message.name, str):
+def validate_message(message: object) -> None:
+    """Reject metadata that is malformed before any of it is used.
+
+    It arrives from another process, so its fields are checked rather than trusted.
+    """
+    if not isinstance(message, SharedMemoryMessage):
         raise ValueError("Invalid shared-memory metadata")
-    sizes = message.buffer_sizes
+    name, sizes = cast(object, message.name), cast(object, message.buffer_sizes)
     if (
-        not message.name
-        or any(type(field) is not int or field < 0 for field in (message.sequence, message.block))
+        not isinstance(name, str)
+        or not name
+        or not _non_negative_int(message.sequence)
+        or not _non_negative_int(message.block)
         or not isinstance(sizes, tuple)
         or not sizes
-        or any(type(size) is not int or size < 0 for size in sizes)
+        or not all(_non_negative_int(size) for size in cast(tuple[object, ...], sizes))
         or sizes[0] == 0
     ):
         raise ValueError("Invalid shared-memory metadata")
 
 
+def _non_negative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
 def _copy_buffers(shared: memoryview, offset: int, sizes: tuple[int, ...]) -> list[memoryview]:
     # A separate writable copy per buffer starts aligned for any dtype and is freed on its own,
     # so a small array cannot keep a large neighbour alive.
-    buffers = []
+    buffers: list[memoryview] = []
     for size in sizes:
         with shared[offset : offset + size] as shared_buffer:
             buffers.append(memoryview(bytearray(shared_buffer)))

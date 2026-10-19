@@ -7,7 +7,7 @@ from multiprocessing import resource_tracker
 from multiprocessing.context import BaseContext
 
 from .receiver import SharedMemoryReceiver
-from .sender import SharedMemorySender, _validate_capacity
+from .sender import SharedMemorySender, validate_capacity
 
 # Before Python 3.13, attaching registers the block with the receiver's tracker.
 # Children forked before any tracker starts would otherwise each run their own.
@@ -30,7 +30,7 @@ def create_shared_memory_pair(
         `(sender, receiver)`. Pass them to worker processes as `Process` arguments
         before the first `put`. One process may produce; many may consume.
     """
-    _validate_capacity(capacity)
+    validate_capacity(capacity)
     context = mp.get_context() if ctx is None else ctx
     if _SHARE_RESOURCE_TRACKER:
         resource_tracker.ensure_running()
