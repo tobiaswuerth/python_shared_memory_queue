@@ -80,7 +80,12 @@ testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 timeout = 45
 xfail_strict = true
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # A thread that one test joined can still be leaving the OS when the next one forks,
+    # and fork() warns about every thread it counts. The fork tests fork on purpose.
+    "ignore:This process .* is multi-threaded, use of fork:DeprecationWarning",
+]
 
 [tool.coverage.run]
 branch = true
