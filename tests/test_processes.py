@@ -164,9 +164,9 @@ def test_abandoned_metadata_does_not_hang_process_exit(make_pair, ctx):
 
 def test_producers_whose_senders_the_parent_dropped(ctx):
     # The documented pattern: create a pair, pass the sender to its process, keep only the
-    # receiver. Process.start() drops its arguments, so the parent's sender is freed. Its
-    # producer-owner slot must stay reserved, or the next pair reuses it and the producers
-    # of the two pairs reject each other as "a second producing process".
+    # receiver. Process.start() drops its arguments, so the parent's sender is freed. Each
+    # pair must keep its own producer ownership anyway, or the producers of different pairs
+    # reject each other as "a second producing process".
     receivers, processes = [], []
     try:
         for _ in range(4):

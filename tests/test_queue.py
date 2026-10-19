@@ -10,6 +10,7 @@ import warnings
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from queue import Empty, Full
 from unittest.mock import Mock
@@ -18,6 +19,7 @@ import numpy as np
 import pytest
 
 from py_sharedmemory import SharedMemoryReceiver, SharedMemorySender, create_shared_memory_pair
+from py_sharedmemory import receiver as receiver_module
 from py_sharedmemory import sender as sender_module
 from py_sharedmemory.convert import release_shared_memory, serialize
 
@@ -155,15 +157,21 @@ def test_close_wakes_a_thread_blocked_in_get(make_pair):
             blocked.result(timeout=5)
 
 
-def test_closing_the_pair_in_this_process_wakes_a_blocked_get(make_pair):
+def test_a_get_waiting_while_the_sender_copy_closes_still_receives(make_pair):
+    # The parent closes its unused copy of the sender while one of its threads waits for
+    # the next message of the child that produces.
     sender, receiver = make_pair()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        blocked = pool.submit(receiver.get, timeout=60)
+        waiting = pool.submit(receiver.get, timeout=10)
         with pytest.raises(TimeoutError):
-            blocked.result(timeout=0.3)
-        sender.close()  # Closes the shared queue objects of this process
-        with pytest.raises(BrokenPipeError):
-            blocked.result(timeout=5)
+            waiting.result(timeout=0.3)
+        sender.close()
+        allocation, message = serialize("from the child")
+        try:
+            receiver._data_queue.put(message)  # As the producing child does
+            assert waiting.result(timeout=5) == "from the child"
+        finally:
+            release_shared_memory(allocation)
 
 
 class ClosingReader:
@@ -233,6 +241,58 @@ def test_pipe_closed_under_a_get_releases_the_cut_off_read(make_pair, monkeypatc
     assert reads[0]() is None
     monkeypatch.undo()
     receiver._closed = False
+
+
+def test_pipe_closed_at_exit_raises_broken_pipe_in_the_main_thread(make_pair, monkeypatch):
+    # Exit handlers close the queues; get() in the main thread reports a closed pair.
+    _, receiver = make_pair()
+    reads = []
+    data_queue = receiver._data_queue
+    monkeypatch.setattr(receiver_module.util, "is_exiting", lambda: True)
+    monkeypatch.setattr(data_queue, "_reader", CutOffReader(reads, lambda: None))
+    with pytest.raises(BrokenPipeError, match="exiting") as caught:
+        receiver.get(timeout=1)
+    gc.collect()
+    assert isinstance(caught.value.__cause__, OSError)
+    assert reads[0]() is None
+
+
+def test_pipe_closed_at_exit_leaves_a_daemon_thread_waiting(make_pair, monkeypatch):
+    # A daemon consumer thread waits in get() when the program ends. An exception printed
+    # from it while the interpreter shuts down can abort the process, so it waits instead
+    # until the exit stops it.
+    _, receiver = make_pair()
+    waiting_out_exit = threading.Event()
+    outcome = []
+    data_queue = receiver._data_queue
+    monkeypatch.setattr(receiver_module.util, "is_exiting", lambda: True)
+    monkeypatch.setattr(receiver_module, "_wait_for_exit", waiting_out_exit.set)
+    monkeypatch.setattr(data_queue, "_reader", CutOffReader([], lambda: None))
+
+    def consume():
+        try:
+            receiver.get()
+        except BrokenPipeError as error:
+            outcome.append(error)
+
+    consumer = threading.Thread(target=consume, daemon=True)
+    consumer.start()
+    consumer.join(5)
+    assert waiting_out_exit.is_set()
+    assert len(outcome) == 1  # Only once the stand-in for waiting forever returned
+
+
+def test_waiting_for_exit_has_no_timeout(monkeypatch):
+    waits = []
+
+    class RecordingEvent:
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return True
+
+    monkeypatch.setattr(threading, "Event", RecordingEvent)
+    receiver_module._wait_for_exit()
+    assert waits == [None]  # Only the end of the process stops the thread
 
 
 def test_unexplained_pipe_errors_propagate(make_pair, monkeypatch):
@@ -539,8 +599,8 @@ def test_ack_channel_failure_closes_without_joining_its_own_thread():
 
 
 def test_ack_pipe_closed_in_this_process_keeps_the_error_but_not_the_read():
-    # A process holding both endpoints that closes its receiver first closes the
-    # acknowledgement pipe under the sender's acknowledgement thread.
+    # Something in this process closes the acknowledgement queue under the sender's
+    # acknowledgement thread, which on Windows cuts off its pending read of the pipe.
     reads = []
 
     class ClosedAckQueue(LocalQueue):
@@ -594,15 +654,42 @@ def test_close_waits_for_an_ack_thread_that_is_already_closing_the_sender():
     assert not sender._ack_thread.is_alive()
 
 
+@dataclass(eq=False)
+class PicklableQueue:
+    name: str
+    closed: bool = False
+
+    def close(self):
+        self.closed = True
+
+    def join_thread(self):
+        pass
+
+    def cancel_join_thread(self):
+        pass
+
+
 def test_unused_sender_can_be_pickled_for_a_child_process():
-    sender = SharedMemorySender(3, "data-queue", "ack-queue")
+    sender = SharedMemorySender(3, PicklableQueue("data"), PicklableQueue("acks"))
     clone = pickle.loads(pickle.dumps(sender))
     assert clone.capacity == 3
-    assert clone._data_queue == "data-queue"
-    assert clone._ack_queue == "ack-queue"
+    assert clone._data_queue.name == "data"
+    assert clone._ack_queue.name == "acks"
     assert clone._process_id is None
     assert clone._condition is not sender._condition
     assert isinstance(clone._condition, threading.Condition)
+
+
+def test_endpoints_unpickled_together_share_their_queues_until_both_close():
+    # A child given both endpoints gets one set of queue objects for the two of them.
+    data, acks = PicklableQueue("data"), PicklableQueue("acks")
+    pair = (SharedMemorySender(3, data, acks), SharedMemoryReceiver(data, acks))
+    sender, receiver = pickle.loads(pickle.dumps(pair))
+    receiver.close()
+    assert not sender._data_queue.closed
+    sender.close()
+    assert sender._data_queue.closed
+    assert sender._ack_queue.closed
 
 
 def test_initialized_sender_rejects_use_from_another_process(make_pair):
@@ -793,16 +880,55 @@ def test_get_waits_again_when_another_consumer_takes_the_message(make_pair, monk
     assert receiver.get(timeout=3) == "next"
 
 
-def test_get_after_the_sender_closed_the_queue_in_this_process(make_pair):
+def test_closing_the_receiver_keeps_the_sender_of_this_process_working(make_pair):
+    # A parent that produces closes its copy of the receiver it handed to its workers.
+    sender, receiver = make_pair(2)
+    receiver.close()
+    sender.put("still sent", timeout=1)
+    assert sender._ack_thread.is_alive()
+    assert not sender._data_queue._closed
+    assert sender._data_queue.get(timeout=3).sequence == 1
+
+
+def test_closing_the_sender_keeps_the_receiver_of_this_process_working(make_pair):
+    # A parent that consumes closes its copy of the sender it handed to its producer.
     sender, receiver = make_pair()
-    sender.close()  # Both endpoints live here, so this closes the shared queue objects
+    sender.close()
+    with pytest.raises(Empty):
+        receiver.get(timeout=0)
+    assert not receiver._data_queue._closed
+
+
+@pytest.mark.parametrize("first", ["sender", "receiver"])
+def test_the_last_open_endpoint_of_a_process_closes_the_queues(make_pair, first):
+    sender, receiver = make_pair()
+    endpoints = {"sender": sender, "receiver": receiver}
+    endpoints.pop(first).close()
+    assert not sender._data_queue._closed
+    endpoints.popitem()[1].close()
+    assert sender._data_queue._closed
+    assert sender._ack_queue._closed
+
+
+def test_a_dropped_endpoint_does_not_keep_the_queues_open():
+    sender, receiver = create_shared_memory_pair(1)
+    del sender
+    gc.collect()
+    receiver.close()
+    assert receiver._data_queue._closed
+    assert receiver._ack_queue._closed
+
+
+def test_get_after_the_queue_was_closed_in_this_process(make_pair):
+    _, receiver = make_pair()
+    receiver._data_queue.close()
     with pytest.raises(BrokenPipeError, match="closed in this process"):
         receiver.get(timeout=0)
 
 
-def test_put_after_the_receiver_closed_the_queue_in_this_process(make_pair):
-    sender, receiver = make_pair()
-    receiver.close()  # A consumer thread finished and closed the shared queue objects
+def test_put_after_the_queue_was_closed_in_this_process(make_pair):
+    sender, _ = make_pair()
+    sender._data_queue.close()
     # Either path reports it the same way: the put itself, or the acknowledgement thread
     # noticing first and closing the sender.
     with pytest.raises(BrokenPipeError):
@@ -912,6 +1038,7 @@ def test_cleanup_error_does_not_leave_other_allocations_or_queues_open(make_pair
     for index in range(3):
         sender.put(index)
     names = block_names(sender)
+    receiver.close()  # The sender is the last open endpoint, so it closes the queues
     real_close = sender_module.release_shared_memory
 
     def fail_one_close(handle):
@@ -925,8 +1052,7 @@ def test_cleanup_error_does_not_leave_other_allocations_or_queues_open(make_pair
     assert sender.closed
     assert not sender._ack_thread.is_alive()
     assert sender._data_queue._closed
-    assert receiver._ack_queue._closed
-    forget_mappings(receiver)
+    assert sender._ack_queue._closed
     for name in names:
         assert_unlinked(name)
 

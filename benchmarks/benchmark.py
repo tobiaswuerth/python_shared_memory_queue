@@ -1,6 +1,7 @@
 """Compare real process-to-process throughput with multiprocessing.Queue."""
 
 import argparse
+import importlib
 import io
 import json
 import multiprocessing as mp
@@ -10,6 +11,7 @@ import time
 from contextlib import redirect_stderr
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from py_sharedmemory import __version__, create_shared_memory_pair
 
@@ -49,6 +51,8 @@ def _expect(control, expected):
 def measure(transport, payload, count, capacity, ctx):
     """Measure after process startup and warmup, through the last received item."""
     size = payload.nbytes if hasattr(payload, "nbytes") else len(payload)
+    sender: Any  # A shared-memory sender or a multiprocessing.Queue
+    receiver: Any
     if transport == "shared":
         sender, receiver = create_shared_memory_pair(capacity, ctx=ctx)
     else:
@@ -111,8 +115,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.payload == "numpy" and any(size % 4 for size in args.sizes):
         parser.error("NumPy sizes must be multiples of 4 for float32 payloads")
-    if args.payload == "numpy":
-        import numpy as np
+    # NumPy is needed only for NumPy payloads.
+    np: Any = importlib.import_module("numpy") if args.payload == "numpy" else None
 
     ctx = mp.get_context(args.start_method)
     results = []

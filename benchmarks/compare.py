@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+from typing import cast
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -105,7 +106,8 @@ def plot(reports, output, subtitle=""):
         else:
             value = ratios[row, column]
             text = f"{value:.1f}×" if value >= 10 else f"{value:.2f}×"
-            color = label_ink(to_hex(cmap(norm(logs[row, column]))))
+            rgba = cast(tuple[float, float, float, float], cmap(norm(logs[row, column])))
+            color = label_ink(to_hex(rgba))
         ax.text(column + 0.5, row + 0.5, text, ha="center", va="center", color=color, fontsize=10)
 
     ax.set_xticks(np.arange(len(sizes)) + 0.5, [size_label(size) for size in sizes])

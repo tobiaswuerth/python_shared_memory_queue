@@ -1,5 +1,7 @@
 """Fan large tasks out to several consumer processes that share one receiver."""
 
+from __future__ import annotations  # Queue[...] is subscriptable at runtime only from 3.12
+
 import multiprocessing as mp
 import zlib
 from multiprocessing.queues import Queue
@@ -10,7 +12,7 @@ WORKERS = 3
 TASKS = 12
 
 
-def work(receiver: SharedMemoryReceiver, results: Queue) -> None:
+def work(receiver: SharedMemoryReceiver, results: Queue[tuple[int, int]]) -> None:
     with receiver:
         while (task := receiver.get(timeout=30)) is not None:
             task_id, chunk = task

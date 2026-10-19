@@ -110,6 +110,44 @@ def test_orchestrator_launches_pipelines_without_keeping_their_endpoints(ctx):
     assert consumers == {tag: [(index, True) for index in range(5)] for tag in range(4)}
 
 
+@pytest.mark.parametrize("parent", ["produces", "consumes"])
+def test_parent_closes_its_copy_of_the_endpoint_it_handed_over(parent):
+    # As with the unused end of a Pipe, the parent closes its copy of the endpoint it passed
+    # to the child right after starting it, and keeps using the other endpoint.
+    ready, outcomes = SPAWN.Queue(), SPAWN.Queue()
+    sender, receiver = create_shared_memory_pair(2, ctx=SPAWN)
+    if parent == "produces":
+        target, args = workloads.tagged_consumer, (receiver, 0, ready, outcomes)
+    else:
+        target, args = workloads.tagged_producer, (sender, 0, 6, ready, outcomes)
+    child = SPAWN.Process(target=target, args=args)
+    child.start()
+    try:
+        if parent == "produces":
+            receiver.close()
+            with sender:
+                for index in range(6):
+                    send(sender, (0, index, np.full(10_000, index)), [child])
+                send(sender, None, [child])
+                assert sender.wait_for_all_ack(timeout=20)
+            assert receive(outcomes, [child]) == ("consumer", 0, [(i, True) for i in range(6)])
+        else:
+            sender.close()
+            received = []
+            while (message := receive(receiver, [child])) is not None:
+                _, index, payload = message
+                assert (payload == index).all()
+                received.append(index)
+            assert received == list(range(6))
+            assert receive(outcomes, [child]) == ("producer", 0, "ok")
+    finally:
+        stop([child])
+        sender.close()
+        receiver.close()
+        close_queues(ready, outcomes)
+    assert child.exitcode == 0
+
+
 def test_one_pair_per_producer_feeds_one_parent():
     # The README's advice for several producers: one pair each. Rebinding the loop variables
     # releases each previous sender, exactly as ordinary code does.
@@ -271,6 +309,80 @@ def test_mixed_real_world_messages_arrive_exactly():
         stop([producer])
         receiver.close()
     assert producer.exitcode == 0
+
+
+def test_frames_beyond_the_reuse_limit_arrive_and_are_not_kept():
+    # Point clouds or video chunks of ~300 MB: neither side keeps such blocks afterwards.
+    size = 288 * 2**20  # Above the 256 MiB that senders reuse and receivers keep mapped
+    sender, receiver = create_shared_memory_pair(1, ctx=SPAWN)
+    report = SPAWN.Queue()
+    producer = SPAWN.Process(target=workloads.huge_producer, args=(sender, size, 2, report))
+    producer.start()
+    try:
+        for index in range(2):
+            frame = receive(receiver, [producer], timeout=120)
+            assert frame.shape == (size,)
+            assert not np.count_nonzero(frame != index + 1)
+            del frame
+            assert not any(cache.blocks for cache in receiver._caches)
+        kept_for_reuse = receive(report, [producer], timeout=60)
+    finally:
+        stop([producer])
+        receiver.close()
+        close_queues(report)
+    assert kept_for_reuse == 0
+    assert producer.exitcode == 0
+
+
+def test_a_long_stream_of_varying_sizes_stays_within_capacity():
+    # Mostly small messages with occasional large ones: blocks are reused, evicted and
+    # replaced constantly, yet every byte arrives and blocks never exceed the capacity.
+    count = 1_000
+    sender, receiver = create_shared_memory_pair(4, ctx=SPAWN)
+    report = SPAWN.Queue()
+    producer = SPAWN.Process(target=workloads.varying_producer, args=(sender, count, report))
+    producer.start()
+    try:
+        for expected_index, size in enumerate(workloads.varying_sizes(count)):
+            index, payload = receive(receiver, [producer])
+            assert index == expected_index
+            assert payload.shape == (size,)
+            assert not np.count_nonzero(payload != index % 251)
+        most_blocks = receive(report, [producer])
+    finally:
+        stop([producer])
+        receiver.close()
+        close_queues(report)
+    assert most_blocks <= 4
+    assert producer.exitcode == 0
+
+
+@pytest.mark.skipif("fork" not in mp.get_all_start_methods(), reason="Requires fork")
+def test_forked_child_uses_a_receiver_inherited_as_a_global():
+    # Quick Linux scripts often rely on fork: the child finds the receiver in a module
+    # global instead of receiving it as an argument.
+    fork = mp.get_context("fork")
+    sender, receiver = create_shared_memory_pair(2, ctx=fork)
+    results = fork.Queue()
+    workloads.inherited_receiver = receiver
+    try:
+        child = fork.Process(target=workloads.consume_inherited, args=(5, results))
+        child.start()
+    finally:
+        workloads.inherited_receiver = None
+    try:
+        with sender:
+            for index in range(5):
+                send(sender, (index, np.full(50_000, index)), [child])
+            received = receive(results, [child])
+            assert sender.wait_for_all_ack(timeout=20)
+    finally:
+        stop([child])
+        receiver.close()
+        close_queues(results)
+    assert [index for index, _ in received] == list(range(5))
+    assert all((payload == index).all() for index, payload in received)
+    assert child.exitcode == 0
 
 
 def test_threads_of_one_producer_process_share_its_sender():
@@ -521,9 +633,9 @@ for index in range(20):
 assert sender.wait_for_all_ack(timeout=10)
 consumer.join(10)
 assert [message[-1] for message in received] == list(range(20))
-# Closing the receiver first closes the pair's queues under the sender's acknowledgement
-# thread, which on Windows cuts off its read of the acknowledgement pipe.
+# The consumer is done; the sender keeps the pair's queues open until it closes too.
 receiver.close()
+assert sender.wait_for_all_ack(timeout=1)
 sender.close()
 print("closed")
 """

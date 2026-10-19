@@ -58,6 +58,7 @@ test = ["pytest>=7.4", "pytest-cov>=4.1", "pytest-timeout>=2.3", "numpy>=1.26"]
 benchmark = ["numpy>=1.26", "matplotlib>=3.8"]
 dev = [
     "py-sharedmemory[test,benchmark]",
+    "basedpyright>=1.29",
     "build>=1.2",
     "mypy>=1.10",
     "pre-commit>=3.7",
@@ -79,7 +80,12 @@ testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 timeout = 45
 xfail_strict = true
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # A thread that one test joined can still be leaving the OS when the next one forks,
+    # and fork() warns about every thread it counts. The fork tests fork on purpose.
+    "ignore:This process .* is multi-threaded, use of fork:DeprecationWarning",
+]
 
 [tool.coverage.run]
 branch = true
@@ -103,3 +109,14 @@ python_version = "3.11"
 strict = true
 warn_unreachable = true
 files = ["py_sharedmemory"]
+
+# Pyright, basedpyright and Pylance read this, so editors and CI report the same findings.
+# Tests are left out, also when opened in an editor: they pass stand-in queues and inspect
+# private state on purpose. Ruff still lints them.
+[tool.pyright]
+include = ["py_sharedmemory", "examples", "benchmarks"]
+ignore = ["tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+strict = ["py_sharedmemory", "examples"]
+enableTypeIgnoreComments = true

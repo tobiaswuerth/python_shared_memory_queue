@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import errno
+import pickle
 import threading
 import time
 import weakref
 from collections import OrderedDict
 from contextlib import suppress
+from multiprocessing import util
 from multiprocessing.queues import Queue
-from multiprocessing.reduction import ForkingPickler
 from multiprocessing.shared_memory import SharedMemory
 from queue import Empty
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self, cast
 
+from ._sharing import release_queues, share_queues
 from ._timeouts import normalize_timeout
 from .convert import SharedMemoryMessage, attach, drop_spare_descriptor, load, validate_message
 
@@ -28,6 +30,11 @@ _MAX_CACHED_BYTES = 256 * 2**20
 
 # How often a waiting get() checks whether its receiver was closed in the meantime.
 _WAKE_INTERVAL = 0.2
+
+
+def _wait_for_exit() -> None:
+    """Block a daemon thread until the exiting interpreter stops it."""
+    threading.Event().wait()
 
 
 def _remaining(block: bool, deadline: float | None) -> float | None:
@@ -92,12 +99,13 @@ class SharedMemoryReceiver:
         # name, and a child that has not started yet could no longer open it.
         self._owner_lock = owner_lock
         self._closed = False
-        self._init_mappings()
+        self._init_process_state()
 
-    def _init_mappings(self) -> None:
+    def _init_process_state(self) -> None:
         self._mappings = threading.local()
         # Every thread's cache, for close(); a finished thread's cache is freed with it.
         self._caches: weakref.WeakSet[_MappingCache] = weakref.WeakSet()
+        share_queues(self._data_queue, self)
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
@@ -106,7 +114,7 @@ class SharedMemoryReceiver:
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
-        self._init_mappings()
+        self._init_process_state()
 
     @property
     def closed(self) -> bool:
@@ -199,7 +207,8 @@ class SharedMemoryReceiver:
                 finally:
                     queue._rlock.release()
             except OSError as error:
-                # The queue feeder closes the pipe once the pair is closed in this process.
+                # The queue feeder closes the pipe once the pair is closed in this process,
+                # and multiprocessing's exit handlers close it as the process ends.
                 try:
                     self._ensure_pair_open()
                 except BrokenPipeError:
@@ -207,8 +216,15 @@ class SharedMemoryReceiver:
                     # request that can no longer be cancelled; release it now, not at exit.
                     error.__traceback__ = None
                     raise
-                raise
-            return ForkingPickler.loads(data)
+                if not util.is_exiting():
+                    raise
+                error.__traceback__ = None
+                if threading.current_thread().daemon:
+                    # An exception printed while the interpreter shuts down can abort the
+                    # process, so let the exit stop this thread instead.
+                    _wait_for_exit()
+                raise BrokenPipeError("The process is exiting") from error
+            return pickle.loads(data)  # What multiprocessing's ForkingPickler.loads is
 
     def _ensure_pair_open(self) -> None:
         if self._closed:
@@ -219,7 +235,8 @@ class SharedMemoryReceiver:
     def close(self) -> None:
         """Release kept mappings and close this process's queue handles.
 
-        Acknowledgements are flushed first. Idempotent. Other processes sharing the
+        Acknowledgements are flushed first. Idempotent. The queues stay open while the
+        pair's sender in this process is open; it closes them. Other processes sharing the
         receiver are unaffected.
         """
         if self._closed:
@@ -227,6 +244,8 @@ class SharedMemoryReceiver:
         self._closed = True
         for cache in list(self._caches):
             cache.close()
+        if not release_queues(self._data_queue, self):
+            return
         try:
             self._data_queue.cancel_join_thread()
             self._data_queue.close()
