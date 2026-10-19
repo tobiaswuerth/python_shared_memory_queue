@@ -21,7 +21,7 @@ MESSAGES = 30
 def main(mode):
     sender, receiver = create_shared_memory_pair(capacity=4)
     received = []
-    finished = threading.Event()
+    handled_all, woken = threading.Event(), threading.Event()
 
     def consume():
         try:
@@ -29,22 +29,29 @@ def main(mode):
                 index, frame = receiver.get()
                 assert (frame == index).all()
                 received.append(index)
+                if len(received) == MESSAGES:
+                    handled_all.set()
         except BrokenPipeError:
-            finished.set()  # Woken by close()
+            woken.set()  # By close()
 
     consumer = threading.Thread(target=consume, daemon=mode == "daemon")
     consumer.start()
-    for index in range(MESSAGES):
-        sender.put((index, np.full((240, 320, 3), index, np.uint8)), timeout=10)
-    if not sender.wait_for_all_ack(timeout=10):
-        raise TimeoutError("The consumer thread did not receive everything")
-    assert received == list(range(MESSAGES))
-    if mode == "close-wakes":
-        receiver.close()
-        if not finished.wait(5):
-            raise TimeoutError("close() did not wake the consumer thread")
-        consumer.join(5)
-        sender.close()
+    try:
+        for index in range(MESSAGES):
+            sender.put((index, np.full((240, 320, 3), index, np.uint8)), timeout=10)
+        if not sender.wait_for_all_ack(timeout=10):
+            raise TimeoutError("The consumer thread did not receive everything")
+        # get() acknowledges a message before returning it, so wait for the thread itself.
+        if not handled_all.wait(10):
+            raise TimeoutError("The consumer thread did not handle everything")
+        assert received == list(range(MESSAGES))
+    finally:
+        if mode == "close-wakes":
+            receiver.close()
+            if not woken.wait(5):
+                raise TimeoutError("close() did not wake the consumer thread")
+            consumer.join(5)
+            sender.close()
     print(f"ok {mode}: {len(received)} messages")
     # "daemon" ends here with the consumer still waiting and both endpoints open.
 

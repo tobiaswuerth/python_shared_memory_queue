@@ -134,6 +134,39 @@ def bounded_producer(sender, count, size, report):
     report.put(most_blocks)
 
 
+def huge_producer(sender, size, count, report):
+    """Send frames larger than the sender reuses, then report what it kept for reuse."""
+    with sender:
+        for index in range(count):
+            sender.put(np.full(size, index + 1, dtype=np.uint8), timeout=60)
+        if not sender.wait_for_all_ack(timeout=60):
+            raise TimeoutError("Messages were not acknowledged")
+        report.put(len(sender._pool))
+
+
+VARYING_SIZES = (64, 900, 30_000, 200_000, 1_100_000, 3_000_000, 8_000_000)
+
+
+def varying_sizes(count):
+    """Message sizes of a long, uneven stream: mostly small, now and then very large."""
+    rng = np.random.default_rng(11)
+    weights = np.array([30, 20, 15, 15, 10, 7, 3]) / 100
+    return [int(size) for size in rng.choice(VARYING_SIZES, size=count, p=weights)]
+
+
+def varying_producer(sender, count, report):
+    """Stream messages of varying size; report the most blocks ever alive."""
+    most_blocks = 0
+    with sender:
+        for index, size in enumerate(varying_sizes(count)):
+            sender.put((index, np.full(size, index % 251, dtype=np.uint8)), timeout=20)
+            with sender._condition:
+                most_blocks = max(most_blocks, len(sender._blocks) + len(sender._pool))
+        if not sender.wait_for_all_ack(timeout=20):
+            raise TimeoutError("Messages were not acknowledged")
+    report.put(most_blocks)
+
+
 def crashing_producer(sender, count, names):
     """Send, let the metadata reach the pipe, report the block names, then die unclosed."""
     for index in range(count):
@@ -274,6 +307,15 @@ def crashing_consumer(receiver, results, lose_ack):
     receiver._ack_queue.close()
     receiver._ack_queue.join_thread()  # The acknowledgement has reached the pipe
     report_and_exit()
+
+
+inherited_receiver = None  # Set by the parent before it forks
+
+
+def consume_inherited(count, results):
+    """Use a receiver inherited through fork as a module global, not passed as an argument."""
+    with inherited_receiver:
+        results.put([inherited_receiver.get(timeout=20) for _ in range(count)])
 
 
 # --- Process pool ---------------------------------------------------------------------------
