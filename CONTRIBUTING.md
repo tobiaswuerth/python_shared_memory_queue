@@ -46,14 +46,18 @@ python -m benchmarks.benchmark --sizes 1000000 10000000 --repeats 3 --json resul
 python -m benchmarks.compare results.json --image results.png
 ```
 
-`python -m benchmarks.benchmark --help` lists all options. `benchmarks.compare` prints the
-speedups as a Markdown table and draws them as a matrix, one row per report.
+`python -m benchmarks.benchmark --help` lists all options. Each repeat runs both transports
+back to back, alternating which goes first. `benchmarks.compare` takes the ratio of their
+durations in each repeat as one speedup and reports the median with a distribution-free 95%
+confidence interval, which needs at least six repeats. It prints a Markdown table and draws
+a matrix, one row per report.
 
 The [benchmark workflow](.github/workflows/benchmark.yml) runs on every release, on demand,
 and on pull requests that change the benchmarks. It measures Linux, Windows, and macOS
-runners, x86-64 and ARM64, from 1 kB to 100 MB. The run summary shows the speedups, and the
-`benchmark-summary` artifact holds the reports and the platform matrix. To redraw it from
-downloaded reports:
+runners, x86-64 and ARM64, from 1 kB to 100 MB, with 20 repeats per size; manual runs take
+the number of repeats as an input, and pull requests use six. The run summary shows the
+speedups, and the `benchmark-summary` artifact holds the reports and the platform matrix. To
+redraw it from downloaded reports:
 
 ```sh
 python -m benchmarks.compare linux-x64.json linux-arm64.json windows-x64.json \

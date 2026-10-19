@@ -128,11 +128,44 @@ def test_benchmark_rejects_invalid_inputs(args):
     assert caught.value.code == 2
 
 
-def _row(transport, size, status="ok", throughput=100.0):
-    row = {"transport": transport, "size": size, "status": status}
-    if status == "ok":
-        row.update(median_mib_per_second=throughput, median_ms_per_message=8_000.0)
+def _row(transport, size, durations=(1.0,) * 6):
+    """A report row; no durations means the transport failed."""
+    row = {"transport": transport, "size": size, "durations_seconds": list(durations)}
+    row["status"] = "ok" if durations else "failed"
     return row
+
+
+@pytest.mark.parametrize(
+    ("runs", "interval"),
+    [(5, None), (6, (1, 6)), (15, (4, 12)), (30, (10, 21)), (50, (18, 33))],
+)
+def test_median_interval_uses_order_statistics(runs, interval):
+    # The k-th smallest and k-th largest of n runs bound the median with at least 95%
+    # confidence; five runs are too few for any such pair.
+    from benchmarks.compare import median_interval
+
+    assert median_interval(list(range(runs, 0, -1))) == interval
+
+
+def test_speedup_pairs_the_runs_of_both_transports():
+    # Repeat i ran both transports back to back, so its duration ratio is one speedup.
+    from benchmarks.compare import speedups
+
+    standard = [2.0, 3.0, 2.0, 30.0, 2.0, 2.0]  # Run 4 hit a slow moment on the runner
+    shared = [1.0, 1.0, 1.0, 10.0, 0.5, 2.0]
+    report = {"results": [_row("standard", 10**6, standard), _row("shared", 10**6, shared)]}
+    (estimate,) = speedups(report).values()
+    assert estimate.median == 2.5  # Of the ratios 2, 3, 2, 3, 4 and 1
+    assert (estimate.low, estimate.high) == (1.0, 4.0)
+
+
+def test_speedup_without_enough_runs_has_no_interval():
+    from benchmarks.compare import markdown
+
+    rows = [_row("standard", 1_000, [2.0] * 5), _row("shared", 1_000, [1.0] * 5)]
+    assert markdown([{"label": "Old report", "results": rows}]).splitlines()[2] == (
+        "| Old report | **2.00×** |"
+    )
 
 
 @pytest.mark.parametrize(
@@ -155,20 +188,20 @@ def _platform_reports(tmp_path):
         tmp_path / "linux.json",
         "Linux x64",
         [
-            _row("standard", 1_000, throughput=40),
-            _row("shared", 1_000, throughput=10),
-            _row("standard", 10**6, throughput=500),
-            _row("shared", 10**6, throughput=1_000),
+            _row("standard", 1_000, [1.0, 1.1, 0.9, 1.0, 1.0, 1.2]),
+            _row("shared", 1_000, [4.0] * 6),
+            _row("standard", 10**6, [2.0] * 6),
+            _row("shared", 10**6, [1.0, 1.0, 0.8, 1.0, 1.25, 1.0]),
         ],
     )
     macos = _report(
         tmp_path / "macos.json",
         "macOS arm64",
         [
-            _row("standard", 1_000, throughput=5),
-            _row("shared", 1_000, status="failed"),
-            _row("standard", 10**6, throughput=200),
-            _row("shared", 10**6, throughput=3_000),
+            _row("standard", 1_000, [5.0] * 6),
+            _row("shared", 1_000, ()),
+            _row("standard", 10**6, [15.0] * 6),
+            _row("shared", 10**6, [1.0] * 6),
         ],
     )
     return linux, macos
@@ -181,8 +214,8 @@ def test_compare_prints_a_speedup_table_in_platform_order(tmp_path, capsys):
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "| Platform | 1 kB | 1 MB |"
     assert lines[1] == "| --- | ---: | ---: |"
-    assert lines[2] == "| Linux x64 | 0.25× | **2.00×** |"
-    assert lines[3] == "| macOS arm64 | failed | **15.00×** |"
+    assert lines[2] == "| Linux x64 | 0.25× (0.23–0.30) | **2.00×** (1.60–2.50) |"
+    assert lines[3] == "| macOS arm64 | failed | **15.00×** (15.00–15.00) |"
 
 
 def test_compare_draws_the_platform_matrix(tmp_path, capsys):
