@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.3.1
+
+Fixes found by running whole programs shaped like real applications:
+
+- Closing one endpoint no longer breaks the other endpoint in the same process. The
+  creating process holds both endpoints, which share their queues, so a parent that
+  closed its copy of the receiver it had handed to its workers could no longer `put`, and
+  one that closed its copy of the sender could no longer `get`, while the child on the
+  other side stalled. A process now closes the pair's queues when its last open endpoint
+  closes.
+- A daemon thread waiting in `get()` when the program ends no longer crashes the process
+  on Windows when the same process also produces. multiprocessing's exit handlers closed
+  the pipe under the thread, and printing the resulting error during interpreter shutdown
+  aborted the process. The thread now waits for the exit to stop it; the main thread gets
+  `BrokenPipeError`.
+
+Tests and tooling:
+
+- Whole programs run as separate processes and must exit cleanly with nothing on stderr: a
+  vectorized environment pool stepping workers in lockstep, also when the training loop
+  fails while workers are blocked in `put`; dataset workers collected through short polls;
+  repeated evaluation rounds that must not leak descriptors, handles, or shared memory; and
+  background consumer threads.
+- Add tests of ~300 MB frames, a long stream of varying sizes, and endpoints inherited
+  through `fork`.
+- Type-check with strict pyright in CI, using project settings that pyright-based editors
+  such as Pylance and basedpyright read.
+
 ## 4.3.0
 
 Faster receives:

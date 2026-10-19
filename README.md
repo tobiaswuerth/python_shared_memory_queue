@@ -189,6 +189,11 @@ a starting child reopens the pair's semaphores by name, and the names disappear 
 creating process lets go of them. After that, the creating process may drop endpoints it
 does not use, and may create as many further pairs as it needs.
 
+Closing an endpoint affects only that endpoint. As with the unused end of a `Pipe`, the
+parent may close its copy of the endpoint it handed to a child right after starting the
+child, and keep using the other endpoint. A process releases its handles to the pair when
+its last open endpoint closes.
+
 ```python
 ctx = mp.get_context("spawn")  # "fork" and "forkserver" also work
 sender, receiver = create_shared_memory_pair(capacity=4, ctx=ctx)
@@ -258,8 +263,11 @@ while messages are still unacknowledged, they are discarded and the sender emits
 `RuntimeWarning`, so forgetting to drain does not lose data silently. An explicit
 `close()` or an exception leaving the `with` block discards without a warning.
 
-When both endpoints live in one process, drain before closing either of them. A sentinel
-such as `None` is a simple way to tell consumers that the stream has ended.
+When both endpoints live in one process, drain before closing the sender, because closing
+it frees unread messages. A sentinel such as `None` is a simple way to tell consumers that
+the stream has ended. A thread waiting in `get()` without a timeout wakes with
+`BrokenPipeError` when its receiver is closed, and a daemon thread still waiting when the
+program ends simply ends with it.
 
 ### Crashes and deadlocks
 
@@ -295,7 +303,7 @@ message alive.
 | --- | --- |
 | `queue.Full` | `put` found no capacity within `timeout` or with `block=False`. |
 | `queue.Empty` | `get` found no message within `timeout` or with `block=False`. |
-| `BrokenPipeError` | The endpoint is closed, an endpoint in the same process closed the pair, or the producer's acknowledgement channel failed. |
+| `BrokenPipeError` | The endpoint is closed, the producer's acknowledgement channel failed, or the main thread was waiting in `get` while the process exits. |
 | `FileNotFoundError` | `get` received a message that the producer freed by closing before it was read. |
 | `OSError` (`ENOSPC`) | `put` found no room for the message in shared memory, for example a full `/dev/shm` in a container. The sender stays usable. |
 | `ValueError` | A timeout is NaN. |
@@ -318,7 +326,7 @@ for the underlying queues; it defaults to `multiprocessing.get_context()`.
 | `put(obj, block=True, timeout=None)` | Copy `obj` into a shared-memory block and send it. |
 | `put_nowait(obj)` | `put(obj, block=False)`. |
 | `wait_for_all_ack(timeout=None) -> bool` | Wait until every message is received and its block released; `False` on timeout. |
-| `close()` | Free unread messages and reusable blocks silently and release resources. Runs automatically at normal process exit. |
+| `close()` | Free unread messages and reusable blocks silently and release resources. Leaves a receiver in the same process usable. Runs automatically at normal process exit. |
 | `closed` | Whether the sender is closed. |
 | `with sender:` | Closes the sender on exit; warns if a clean exit discards unacknowledged messages. |
 
@@ -328,7 +336,7 @@ for the underlying queues; it defaults to `multiprocessing.get_context()`.
 | --- | --- |
 | `get(block=True, timeout=None)` | Return the next object as an independent local copy. |
 | `get_nowait()` | `get(block=False)`. |
-| `close()` | Flush acknowledgements and close this process's handles. |
+| `close()` | Release kept mappings, flush acknowledgements, and wake waiting `get` calls with `BrokenPipeError`. Leaves a sender in the same process usable. |
 | `closed` | Whether the receiver is closed. |
 | `with receiver:` | Closes the receiver on exit. |
 
